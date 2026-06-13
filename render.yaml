@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: exim-raw-api
+    runtime: image
+    repo: https://github.com/Farxodxon/exim-raw-control-backend
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 8080
