@@ -9,7 +9,6 @@ void main() async {
   
   final router = Router();
   
-  // Health check endpoint
   router.get('/health', (Request request) async {
     return Response.ok(
       jsonEncode({
@@ -21,7 +20,6 @@ void main() async {
     );
   });
   
-  // Test endpoint
   router.get('/api/test', (Request request) async {
     return Response.ok(
       jsonEncode({
@@ -32,12 +30,12 @@ void main() async {
     );
   });
   
-  // Root endpoint
   router.get('/', (Request request) async {
     return Response.ok(
       jsonEncode({
         'name': 'Exim Raw Control Backend',
         'version': '1.0.0',
+        'status': 'running',
         'endpoints': ['/health', '/api/test'],
       }),
       headers: {'Content-Type': 'application/json'},
@@ -46,29 +44,22 @@ void main() async {
   
   // CORS handler
   final handler = (Request request) async {
-    // Handle preflight requests
     if (request.method == 'OPTIONS') {
       return Response.ok('', headers: {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-        'Access-Control-Max-Age': '86400',
       });
     }
     
-    // Process request
     final response = await router(request);
-    
-    // Add CORS headers
     return response.change(headers: {
       'Access-Control-Allow-Origin': '*',
     });
   };
   
-  // Start server
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   final server = await shelf_io.serve(handler, '0.0.0.0', port);
   
-  print('✅ Server running on http://0.0.0.0:${server.port}');
-  print('📊 Health check: http://localhost:${server.port}/health');
+  print('✅ Server running on port $port');
 }
