@@ -1,6 +1,6 @@
 name: exim_raw_backend
 version: 1.0.0
-description: Backend for exim raw material control system
+description: Backend for exim raw material control
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -8,3 +8,8 @@ environment:
 dependencies:
   shelf: ^1.4.1
   shelf_router: ^1.1.4
+  postgres: ^3.4.8
+  dotenv: ^4.2.0
+
+dev_dependencies:
+  lints: ^3.0.0
