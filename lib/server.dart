@@ -107,6 +107,60 @@ void main() async {
     });
   };
   
+
+  router.post('/api/orders/check', (Request request) async {
+  try {
+    final body = jsonDecode(await request.readAsString());
+    final barcodes = List<String>.from(body['barcodes']);
+
+    final conn = await DatabaseConnection.getConnection();
+    final results = [];
+
+    for (final barcode in barcodes) {
+      final result = await conn.execute(
+        'SELECT * FROM products WHERE barcode = \$1',
+        parameters: [barcode],
+      );
+      
+      if (result.isNotEmpty) {
+        final row = result.first;
+        results.add({
+          'barcode': barcode,
+          'found': true,
+          'product': {
+            'id': row[0],
+            'barcode': row[1],
+            'name': row[2],
+            'category': row[3],
+            'tnved': row[4],
+            'pcs_in_box': row[5],
+            'price_usd': row[6],
+            'netto_per_piece': row[7],
+          }
+        });
+      } else {
+        results.add({
+          'barcode': barcode,
+          'found': false,
+        });
+      }
+    }
+
+    return Response.ok(
+      jsonEncode({
+        'total': barcodes.length,
+        'found': results.where((r) => r['found'] == true).length,
+        'not_found': results.where((r) => r['found'] == false).length,
+        'results': results,
+      }),
+      headers: {'Content-Type': 'application/json'},
+    );
+  } catch (e) {
+    return Response.internalServerError(
+      body: jsonEncode({'error': e.toString()}),
+    );
+  }
+});
   // Serverni ishga tushirish - '_' bilan almashtiramiz (warning yo'qoladi)
   final _ = await shelf_io.serve(handler, '0.0.0.0', 8080);
   print('✅ Server running on http://localhost:8080');
