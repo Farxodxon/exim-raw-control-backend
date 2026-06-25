@@ -4,19 +4,28 @@ import 'package:dotenv/dotenv.dart';
 
 class DatabaseConnection {
   static Connection? _connection;
+  static bool _isConnected = false;
   
   static Future<Connection> getConnection() async {
-    if (_connection != null) {
-      return _connection!;
+    // Agar ulanish mavjud va ochiq bo‘lsa, qaytaramiz
+    if (_connection != null && _isConnected) {
+      try {
+        // Ulanish hali ishlayotganligini tekshirish
+        await _connection!.execute('SELECT 1');
+        return _connection!;
+      } catch (e) {
+        // Ulanish yopilgan, qayta ochamiz
+        _isConnected = false;
+        _connection = null;
+      }
     }
     
-    // .env faylini yuklash - HUJJATLAR BO'YICHA TO'G'RI USUL
+    // .env faylini yuklash
     final env = DotEnv()..load();
     
     // DATABASE_URL ni olish
     String? databaseUrl = Platform.environment['DATABASE_URL'];
     if (databaseUrl == null || databaseUrl.isEmpty) {
-      // TO'G'RI: env[] ishlatiladi (dotenv.env EMAS)
       databaseUrl = env['DATABASE_URL'];
     }
     
@@ -47,6 +56,7 @@ class DatabaseConnection {
       ),
     );
     
+    _isConnected = true;
     print('✅ Connected to PostgreSQL');
     return _connection!;
   }
@@ -54,6 +64,8 @@ class DatabaseConnection {
   static Future<void> close() async {
     if (_connection != null) {
       await _connection!.close();
+      _isConnected = false;
+      _connection = null;
     }
   }
 }
