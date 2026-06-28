@@ -78,13 +78,13 @@ void main() async {
       int idx = 1;
 
       if (search.isNotEmpty) {
-        sql += ' AND (name ILIKE \$${idx} OR barcode ILIKE \$${idx + 1})';
+       sql += ' AND (name ILIKE \$${idx} OR barcode ILIKE \$${idx + 1})';
         args.add('%\$search%');
         args.add('%\$search%');
         idx += 2;
       }
       if (category.isNotEmpty) {
-        sql += ' AND category = \$${idx}';
+        sql += ' AND category = \\${idx}';
         args.add(category);
         idx++;
       }
@@ -232,6 +232,153 @@ void main() async {
         'not_found': results.where((r) => r['found'] == false).length,
         'results': results,
       }), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+
+  // ─── SETUP (jadvallar yaratish) ──────────────────────────────────────────────
+  router.get('/api/setup', (Request request) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+          id SERIAL PRIMARY KEY,
+          order_number VARCHAR(50),
+          country VARCHAR(100),
+          company_name VARCHAR(200),
+          contract_number VARCHAR(100),
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      ''');
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS order_items (
+          id SERIAL PRIMARY KEY,
+          order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+          barcode VARCHAR(20),
+          product_name VARCHAR(300),
+          quantity INTEGER DEFAULT 0,
+          price_usd DECIMAL(10,2),
+          found BOOLEAN DEFAULT false
+        )
+      ''');
+      return Response.ok(
+        jsonEncode({'message': 'Jadvallar yaratildi'}),
+        headers: {'Content-Type': 'application/json'},
+      );
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // ─── ORDERS ──────────────────────────────────────────────────────────────────
+
+  // GET /api/orders
+  router.get('/api/orders', (Request request) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final result = await conn.execute(
+        '''SELECT o.*, COUNT(oi.id) as total_items,
+          SUM(CASE WHEN oi.found THEN 1 ELSE 0 END) as found_items
+          FROM orders o
+          LEFT JOIN order_items oi ON oi.order_id = o.id
+          GROUP BY o.id ORDER BY o.created_at DESC'''
+      );
+      final orders = result.map((row) => {
+        'id': row[0], 'order_number': row[1], 'country': row[2],
+        'company_name': row[3], 'contract_number': row[4],
+        'created_at': row[5]?.toString(),
+        'total_items': row[6], 'found_items': row[7],
+      }).toList();
+      return Response.ok(jsonEncode(orders), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // POST /api/orders
+  router.post('/api/orders', (Request request) async {
+    try {
+      final body = jsonDecode(await request.readAsString());
+      final conn = await DatabaseConnection.getConnection();
+      final result = await conn.execute(
+        '''INSERT INTO orders (order_number, country, company_name, contract_number)
+          VALUES (\$1, \$2, \$3, \$4) RETURNING *''',
+        parameters: [body['order_number'], body['country'], body['company_name'], body['contract_number']],
+      );
+      final row = result.first;
+      return Response.ok(jsonEncode({
+        'id': row[0], 'order_number': row[1], 'country': row[2],
+        'company_name': row[3], 'contract_number': row[4], 'created_at': row[5]?.toString(),
+      }), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // GET /api/orders/:id
+  router.get('/api/orders/<id>', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final orderRes = await conn.execute(
+        'SELECT * FROM orders WHERE id=\$1', parameters: [int.parse(id)]);
+      if (orderRes.isEmpty) {
+        return Response(404, body: jsonEncode({'error': 'Topilmadi'}),
+          headers: {'Content-Type': 'application/json'});
+      }
+      final o = orderRes.first;
+      final itemsRes = await conn.execute(
+        'SELECT * FROM order_items WHERE order_id=\$1 ORDER BY id',
+        parameters: [int.parse(id)]);
+      final items = itemsRes.map((row) => {
+        'id': row[0], 'order_id': row[1], 'barcode': row[2],
+        'product_name': row[3], 'quantity': row[4], 'price_usd': row[5], 'found': row[6],
+      }).toList();
+      return Response.ok(jsonEncode({
+        'id': o[0], 'order_number': o[1], 'country': o[2],
+        'company_name': o[3], 'contract_number': o[4], 'created_at': o[5]?.toString(),
+        'items': items,
+      }), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // POST /api/orders/:id/items (barcha itemlarni saqlash)
+  router.post('/api/orders/<id>/items', (Request request, String id) async {
+    try {
+      final body = jsonDecode(await request.readAsString());
+      final items = List<Map<String, dynamic>>.from(body['items']);
+      final conn = await DatabaseConnection.getConnection();
+      // Avval eski itemlarni o'chiramiz
+      await conn.execute('DELETE FROM order_items WHERE order_id=\$1',
+        parameters: [int.parse(id)]);
+      // Yangilarini qo'shamiz
+      for (final item in items) {
+        await conn.execute(
+          '''INSERT INTO order_items (order_id, barcode, product_name, quantity, price_usd, found)
+            VALUES (\$1, \$2, \$3, \$4, \$5, \$6)''',
+          parameters: [
+            int.parse(id), item['barcode'], item['product_name'],
+            item['quantity'] ?? 0, item['price_usd'], item['found'] ?? false,
+          ],
+        );
+      }
+      return Response.ok(jsonEncode({'message': 'Saqlandi', 'count': items.length}),
+        headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // DELETE /api/orders/:id
+  router.delete('/api/orders/<id>', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('DELETE FROM orders WHERE id=\$1', parameters: [int.parse(id)]);
+      return Response.ok(jsonEncode({'message': "O'chirildi"}),
+        headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
     }
