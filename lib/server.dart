@@ -238,6 +238,43 @@ void main() async {
   });
 
 
+
+  // ─── SETUP RESET ─────────────────────────────────────────────────────────────
+  router.get('/api/setup-reset', (Request request) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('DROP TABLE IF EXISTS order_items CASCADE');
+      await conn.execute('DROP TABLE IF EXISTS orders CASCADE');
+      await conn.execute('''
+        CREATE TABLE orders (
+          id SERIAL PRIMARY KEY,
+          order_number VARCHAR(100),
+          country VARCHAR(100),
+          company_name VARCHAR(200),
+          contract_number VARCHAR(100),
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      ''');
+      await conn.execute('''
+        CREATE TABLE order_items (
+          id SERIAL PRIMARY KEY,
+          order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+          barcode VARCHAR(20),
+          product_name VARCHAR(300),
+          quantity INTEGER DEFAULT 0,
+          price_usd DECIMAL(10,2),
+          found BOOLEAN DEFAULT false
+        )
+      ''');
+      return Response.ok(
+        jsonEncode({'message': 'Jadvallar qayta yaratildi'}),
+        headers: {'Content-Type': 'application/json'},
+      );
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
   // ─── SETUP (jadvallar yaratish) ──────────────────────────────────────────────
   router.get('/api/setup', (Request request) async {
     try {
