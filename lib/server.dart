@@ -421,6 +421,323 @@ void main() async {
     }
   });
 
+
+  // ─── SIRYO SETUP ─────────────────────────────────────────────────────────────
+  router.get('/api/setup-materials', (Request request) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+
+      // Siryo katalogi
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS raw_materials (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(200) NOT NULL,
+          code VARCHAR(100),
+          unit VARCHAR(20) DEFAULT 'kg',
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      ''');
+
+      // Kirim lotlari
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS material_incomes (
+          id SERIAL PRIMARY KEY,
+          raw_material_id INTEGER REFERENCES raw_materials(id) ON DELETE CASCADE,
+          netto_kg DECIMAL(12,3) NOT NULL,
+          brutto_kg DECIMAL(12,3),
+          doc_number VARCHAR(100),
+          income_date DATE DEFAULT CURRENT_DATE,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      ''');
+
+      // Mahsulot-siryo bog'liqlik (1 dona uchun necha gram)
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS product_materials (
+          id SERIAL PRIMARY KEY,
+          product_barcode VARCHAR(20) NOT NULL,
+          raw_material_id INTEGER REFERENCES raw_materials(id) ON DELETE CASCADE,
+          grams_per_unit DECIMAL(10,3) NOT NULL,
+          UNIQUE(product_barcode, raw_material_id)
+        )
+      ''');
+
+      // Avtomatik rasxod
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS material_expenses (
+          id SERIAL PRIMARY KEY,
+          raw_material_id INTEGER REFERENCES raw_materials(id) ON DELETE CASCADE,
+          order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+          product_barcode VARCHAR(20),
+          quantity_kg DECIMAL(12,3) NOT NULL,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      ''');
+
+      return Response.ok(
+        jsonEncode({'message': 'Siryo jadvallari yaratildi'}),
+        headers: {'Content-Type': 'application/json'},
+      );
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // ─── RAW MATERIALS CATALOG ───────────────────────────────────────────────────
+
+  router.get('/api/raw-materials-catalog', (Request request) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final result = await conn.execute('''
+        SELECT r.*,
+          COALESCE(SUM(i.netto_kg), 0) as total_income,
+          COALESCE(SUM(e.quantity_kg), 0) as total_expense
+        FROM raw_materials r
+        LEFT JOIN material_incomes i ON i.raw_material_id = r.id
+        LEFT JOIN material_expenses e ON e.raw_material_id = r.id
+        GROUP BY r.id ORDER BY r.name
+      ''');
+      final list = result.map((row) => {
+        'id': row[0], 'name': row[1], 'code': row[2], 'unit': row[3],
+        'created_at': row[4]?.toString(),
+        'total_income': row[5], 'total_expense': row[6],
+        'balance': (double.tryParse(row[5].toString()) ?? 0) - (double.tryParse(row[6].toString()) ?? 0),
+      }).toList();
+      return Response.ok(jsonEncode(list), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  router.post('/api/raw-materials-catalog', (Request request) async {
+    try {
+      final body = jsonDecode(await request.readAsString());
+      final conn = await DatabaseConnection.getConnection();
+      final result = await conn.execute(
+        'INSERT INTO raw_materials (name, code, unit) VALUES (\$1, \$2, \$3) RETURNING *',
+        parameters: [body['name'], body['code'], body['unit'] ?? 'kg'],
+      );
+      final row = result.first;
+      return Response.ok(jsonEncode({
+        'id': row[0], 'name': row[1], 'code': row[2], 'unit': row[3],
+      }), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  router.delete('/api/raw-materials-catalog/<id>', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('DELETE FROM raw_materials WHERE id=\$1', parameters: [int.parse(id)]);
+      return Response.ok(jsonEncode({'message': "O'chirildi"}), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // ─── MATERIAL INCOMES ────────────────────────────────────────────────────────
+
+  router.get('/api/material-incomes', (Request request) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final params = request.url.queryParameters;
+      String sql = '''
+        SELECT i.*, r.name as material_name, r.code as material_code
+        FROM material_incomes i
+        JOIN raw_materials r ON r.id = i.raw_material_id
+        WHERE 1=1
+      ''';
+      final List<Object?> args = [];
+      if (params['material_id'] != null) {
+        sql += ' AND i.raw_material_id = \$1';
+        args.add(int.parse(params['material_id']!));
+      }
+      sql += ' ORDER BY i.income_date DESC, i.created_at DESC';
+      final result = await conn.execute(sql, parameters: args);
+      final list = result.map((row) => {
+        'id': row[0], 'raw_material_id': row[1], 'netto_kg': row[2],
+        'brutto_kg': row[3], 'doc_number': row[4],
+        'income_date': row[5]?.toString(), 'created_at': row[6]?.toString(),
+        'material_name': row[7], 'material_code': row[8],
+      }).toList();
+      return Response.ok(jsonEncode(list), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  router.post('/api/material-incomes', (Request request) async {
+    try {
+      final body = jsonDecode(await request.readAsString());
+      final conn = await DatabaseConnection.getConnection();
+      final result = await conn.execute(
+        '''INSERT INTO material_incomes (raw_material_id, netto_kg, brutto_kg, doc_number, income_date)
+          VALUES (\$1, \$2, \$3, \$4, \$5) RETURNING *''',
+        parameters: [
+          body['raw_material_id'], body['netto_kg'], body['brutto_kg'],
+          body['doc_number'], body['income_date'],
+        ],
+      );
+      final row = result.first;
+      return Response.ok(jsonEncode({
+        'id': row[0], 'raw_material_id': row[1], 'netto_kg': row[2],
+        'brutto_kg': row[3], 'doc_number': row[4], 'income_date': row[5]?.toString(),
+      }), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  router.delete('/api/material-incomes/<id>', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('DELETE FROM material_incomes WHERE id=\$1', parameters: [int.parse(id)]);
+      return Response.ok(jsonEncode({'message': "O'chirildi"}), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // ─── PRODUCT MATERIALS ───────────────────────────────────────────────────────
+
+  router.get('/api/product-materials/<barcode>', (Request request, String barcode) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final result = await conn.execute(
+        '''SELECT pm.*, r.name as material_name, r.code as material_code, r.unit
+          FROM product_materials pm
+          JOIN raw_materials r ON r.id = pm.raw_material_id
+          WHERE pm.product_barcode = \$1''',
+        parameters: [barcode],
+      );
+      final list = result.map((row) => {
+        'id': row[0], 'product_barcode': row[1], 'raw_material_id': row[2],
+        'grams_per_unit': row[3], 'material_name': row[4],
+        'material_code': row[5], 'unit': row[6],
+      }).toList();
+      return Response.ok(jsonEncode(list), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  router.post('/api/product-materials', (Request request) async {
+    try {
+      final body = jsonDecode(await request.readAsString());
+      final conn = await DatabaseConnection.getConnection();
+      final result = await conn.execute(
+        '''INSERT INTO product_materials (product_barcode, raw_material_id, grams_per_unit)
+          VALUES (\$1, \$2, \$3)
+          ON CONFLICT (product_barcode, raw_material_id)
+          DO UPDATE SET grams_per_unit = EXCLUDED.grams_per_unit
+          RETURNING *''',
+        parameters: [body['product_barcode'], body['raw_material_id'], body['grams_per_unit']],
+      );
+      final row = result.first;
+      return Response.ok(jsonEncode({
+        'id': row[0], 'product_barcode': row[1],
+        'raw_material_id': row[2], 'grams_per_unit': row[3],
+      }), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  router.delete('/api/product-materials/<id>', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('DELETE FROM product_materials WHERE id=\$1', parameters: [int.parse(id)]);
+      return Response.ok(jsonEncode({'message': "O'chirildi"}), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // ─── MATERIAL EXPENSES (avtomatik) ───────────────────────────────────────────
+
+  router.get('/api/material-expenses', (Request request) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final params = request.url.queryParameters;
+      String sql = '''
+        SELECT e.*, r.name as material_name, r.code as material_code,
+          o.order_number
+        FROM material_expenses e
+        JOIN raw_materials r ON r.id = e.raw_material_id
+        LEFT JOIN orders o ON o.id = e.order_id
+        WHERE 1=1
+      ''';
+      final List<Object?> args = [];
+      if (params['material_id'] != null) {
+        sql += ' AND e.raw_material_id = \$1';
+        args.add(int.parse(params['material_id']!));
+      }
+      sql += ' ORDER BY e.created_at DESC';
+      final result = await conn.execute(sql, parameters: args);
+      final list = result.map((row) => {
+        'id': row[0], 'raw_material_id': row[1], 'order_id': row[2],
+        'product_barcode': row[3], 'quantity_kg': row[4],
+        'created_at': row[5]?.toString(),
+        'material_name': row[6], 'material_code': row[7], 'order_number': row[8],
+      }).toList();
+      return Response.ok(jsonEncode(list), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // POST /api/orders/:id/calculate-expenses — buyurtma saqlanganda chaqiriladi
+  router.post('/api/orders/<id>/calculate-expenses', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final orderId = int.parse(id);
+
+      // Avval eski rasxodlarni o'chiramiz
+      await conn.execute('DELETE FROM material_expenses WHERE order_id=\$1', parameters: [orderId]);
+
+      // Buyurtma itemlarini olamiz
+      final items = await conn.execute(
+        'SELECT barcode, quantity FROM order_items WHERE order_id=\$1 AND found=true AND quantity > 0',
+        parameters: [orderId],
+      );
+
+      int totalExpenses = 0;
+      for (final item in items) {
+        final barcode = item[0] as String;
+        final qty = (item[1] as num).toInt();
+
+        // Bu mahsulot uchun siryo bog'liqliklarini olamiz
+        final materials = await conn.execute(
+          'SELECT raw_material_id, grams_per_unit FROM product_materials WHERE product_barcode=\$1',
+          parameters: [barcode],
+        );
+
+        for (final mat in materials) {
+          final materialId = mat[0] as int;
+          final gramsPerUnit = double.tryParse(mat[1].toString()) ?? 0;
+          final quantityKg = (qty * gramsPerUnit) / 1000.0;
+
+          if (quantityKg > 0) {
+            await conn.execute(
+              '''INSERT INTO material_expenses (raw_material_id, order_id, product_barcode, quantity_kg)
+                VALUES (\$1, \$2, \$3, \$4)''',
+              parameters: [materialId, orderId, barcode, quantityKg],
+            );
+            totalExpenses++;
+          }
+        }
+      }
+
+      return Response.ok(
+        jsonEncode({'message': 'Rasxod hisoblandi', 'expense_records': totalExpenses}),
+        headers: {'Content-Type': 'application/json'},
+      );
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
   // ─── CORS HANDLER ────────────────────────────────────────────────────────────
   final handler = (Request request) async {
     if (request.method == 'OPTIONS') {
