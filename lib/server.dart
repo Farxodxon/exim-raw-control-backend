@@ -422,6 +422,48 @@ void main() async {
   });
 
 
+
+  router.get('/api/setup-materials-reset', (Request request) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('DROP TABLE IF EXISTS material_expenses CASCADE');
+      await conn.execute('DROP TABLE IF EXISTS product_materials CASCADE');
+      await conn.execute('DROP TABLE IF EXISTS material_incomes CASCADE');
+      await conn.execute('DROP TABLE IF EXISTS raw_materials CASCADE');
+      await conn.execute('''CREATE TABLE raw_materials (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(200) NOT NULL,
+        code VARCHAR(100),
+        unit VARCHAR(20) DEFAULT ''''kg'''',
+        created_at TIMESTAMP DEFAULT NOW())''');
+      await conn.execute('''CREATE TABLE material_incomes (
+        id SERIAL PRIMARY KEY,
+        raw_material_id INTEGER REFERENCES raw_materials(id) ON DELETE CASCADE,
+        netto_kg DECIMAL(12,3) NOT NULL,
+        brutto_kg DECIMAL(12,3),
+        doc_number VARCHAR(100),
+        income_date DATE DEFAULT CURRENT_DATE,
+        created_at TIMESTAMP DEFAULT NOW())''');
+      await conn.execute('''CREATE TABLE product_materials (
+        id SERIAL PRIMARY KEY,
+        product_barcode VARCHAR(20) NOT NULL,
+        raw_material_id INTEGER REFERENCES raw_materials(id) ON DELETE CASCADE,
+        grams_per_unit DECIMAL(10,3) NOT NULL,
+        UNIQUE(product_barcode, raw_material_id))''');
+      await conn.execute('''CREATE TABLE material_expenses (
+        id SERIAL PRIMARY KEY,
+        raw_material_id INTEGER REFERENCES raw_materials(id) ON DELETE CASCADE,
+        order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+        product_barcode VARCHAR(20),
+        quantity_kg DECIMAL(12,3) NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW())''');
+      return Response.ok(jsonEncode({'message': 'Siryo jadvallari qayta yaratildi'}),
+        headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
   // ─── SIRYO SETUP ─────────────────────────────────────────────────────────────
   router.get('/api/setup-materials', (Request request) async {
     try {
