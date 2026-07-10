@@ -574,12 +574,10 @@ void main() async {
       final conn = await DatabaseConnection.getConnection();
       final result = await conn.execute('''
         SELECT r.*,
-          COALESCE(SUM(i.netto_kg), 0) as total_income,
-          COALESCE(SUM(e.quantity_kg), 0) as total_expense
+          COALESCE((SELECT SUM(i.netto_kg) FROM material_incomes i WHERE i.raw_material_id = r.id), 0) as total_income,
+          COALESCE((SELECT SUM(e.quantity_kg) FROM material_expenses e WHERE e.raw_material_id = r.id), 0) as total_expense
         FROM raw_materials r
-        LEFT JOIN material_incomes i ON i.raw_material_id = r.id
-        LEFT JOIN material_expenses e ON e.raw_material_id = r.id
-        GROUP BY r.id ORDER BY r.name
+        ORDER BY r.name
       ''');
       final list = result.map((row) => {
         'id': row[0], 'name': row[1], 'code': row[2], 'unit': row[3],
