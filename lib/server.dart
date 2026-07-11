@@ -709,17 +709,23 @@ void main() async {
       final body = jsonDecode(await request.readAsString());
       final conn = await DatabaseConnection.getConnection();
       final result = await conn.execute(
-        '''INSERT INTO product_materials (product_barcode, raw_material_id, grams_per_unit)
-          VALUES (\$1, \$2, \$3)
+        '''INSERT INTO product_materials (product_barcode, raw_material_id, grams_per_unit, is_active, active_from)
+          VALUES (\$1, \$2, \$3, \$4, \$5)
           ON CONFLICT (product_barcode, raw_material_id)
-          DO UPDATE SET grams_per_unit = EXCLUDED.grams_per_unit
+          DO UPDATE SET grams_per_unit = EXCLUDED.grams_per_unit,
+            is_active = EXCLUDED.is_active,
+            active_from = EXCLUDED.active_from
           RETURNING *''',
-        parameters: [body['product_barcode'], body['raw_material_id'], body['grams_per_unit']],
+        parameters: [
+          body['product_barcode'], body['raw_material_id'], body['grams_per_unit'],
+          body['is_active'] ?? true, body['active_from'],
+        ],
       );
       final row = result.first;
       return Response.ok(jsonEncode({
         'id': row[0], 'product_barcode': row[1],
         'raw_material_id': row[2], 'grams_per_unit': row[3],
+        'is_active': row[4], 'active_from': row[5]?.toString(),
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
@@ -778,22 +784,53 @@ void main() async {
       // Avval eski rasxodlarni o'chiramiz
       await conn.execute('DELETE FROM material_expenses WHERE order_id=\$1', parameters: [orderId]);
 
+      // expense_date: body dan olish, yo'q bo'lsa NOW()
+      String? expenseDateStr;
+      try {
+        final reqBody = await request.readAsString();
+        if (reqBody.isNotEmpty) {
+          final bodyData = jsonDecode(reqBody);
+          expenseDateStr = bodyData['expense_date'];
+        }
+      } catch (_) {}
+
+      // Buyurtma sanasini olamiz (expense_date berilmasa)
+      if (expenseDateStr == null) {
+        final orderRes = await conn.execute(
+          'SELECT created_at FROM orders WHERE id=\$1', parameters: [orderId]);
+        if (orderRes.isNotEmpty) {
+          expenseDateStr = orderRes.first[0]?.toString();
+        }
+      }
+
       // Buyurtma itemlarini olamiz
       final items = await conn.execute(
         'SELECT barcode, quantity FROM order_items WHERE order_id=\$1 AND found=true AND quantity > 0',
         parameters: [orderId],
       );
 
+      // Buyurtma sanasi (filter uchun)
+      final orderDate = expenseDateStr != null
+          ? DateTime.tryParse(expenseDateStr)?.toIso8601String().substring(0, 10)
+          : null;
+
       int totalExpenses = 0;
       for (final item in items) {
         final barcode = item[0] as String;
         final qty = (item[1] as num).toInt();
 
-        // Bu mahsulot uchun siryo bog'liqliklarini olamiz
-        final materials = await conn.execute(
-          'SELECT raw_material_id, grams_per_unit FROM product_materials WHERE product_barcode=\$1',
-          parameters: [barcode],
-        );
+        // Faol va sana shartiga mos siryo bog'liqliklarini olamiz
+        String matSql = '''SELECT raw_material_id, grams_per_unit
+          FROM product_materials
+          WHERE product_barcode=\$1 AND is_active=true''';
+        final List<Object?> matArgs = [barcode];
+
+        if (orderDate != null) {
+          matSql += ' AND (active_from IS NULL OR active_from <= \$2)';
+          matArgs.add(orderDate);
+        }
+
+        final materials = await conn.execute(matSql, parameters: matArgs);
 
         for (final mat in materials) {
           final materialId = mat[0] as int;
@@ -801,11 +838,19 @@ void main() async {
           final quantityKg = (qty * gramsPerUnit) / 1000.0;
 
           if (quantityKg > 0) {
-            await conn.execute(
-              '''INSERT INTO material_expenses (raw_material_id, order_id, product_barcode, quantity_kg)
-                VALUES (\$1, \$2, \$3, \$4)''',
-              parameters: [materialId, orderId, barcode, quantityKg],
-            );
+            if (expenseDateStr != null) {
+              await conn.execute(
+                '''INSERT INTO material_expenses (raw_material_id, order_id, product_barcode, quantity_kg, expense_date)
+                  VALUES (\$1, \$2, \$3, \$4, \$5)''',
+                parameters: [materialId, orderId, barcode, quantityKg, expenseDateStr],
+              );
+            } else {
+              await conn.execute(
+                '''INSERT INTO material_expenses (raw_material_id, order_id, product_barcode, quantity_kg)
+                  VALUES (\$1, \$2, \$3, \$4)''',
+                parameters: [materialId, orderId, barcode, quantityKg],
+              );
+            }
             totalExpenses++;
           }
         }
@@ -815,6 +860,83 @@ void main() async {
         jsonEncode({'message': 'Rasxod hisoblandi', 'expense_records': totalExpenses}),
         headers: {'Content-Type': 'application/json'},
       );
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+
+  // GET /api/orders/:id/expense-report — dalolatnoma
+  router.get('/api/orders/<id>/expense-report', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final orderId = int.parse(id);
+
+      // Buyurtma ma'lumotlari
+      final orderRes = await conn.execute(
+        'SELECT * FROM orders WHERE id=\$1', parameters: [orderId]);
+      if (orderRes.isEmpty) {
+        return Response(404, body: jsonEncode({'error': 'Topilmadi'}),
+          headers: {'Content-Type': 'application/json'});
+      }
+      final order = orderRes.first;
+
+      // Siryo bo'yicha guruhlab rasxodlarni olamiz
+      final expRes = await conn.execute('''
+        SELECT
+          r.id as material_id,
+          r.name as material_name,
+          r.code as material_code,
+          r.unit,
+          e.product_barcode,
+          p.name as product_name,
+          e.quantity_kg,
+          oi.quantity as product_qty,
+          pm.grams_per_unit,
+          e.expense_date
+        FROM material_expenses e
+        JOIN raw_materials r ON r.id = e.raw_material_id
+        LEFT JOIN products p ON p.barcode = e.product_barcode
+        LEFT JOIN order_items oi ON oi.order_id = e.order_id AND oi.barcode = e.product_barcode
+        LEFT JOIN product_materials pm ON pm.product_barcode = e.product_barcode AND pm.raw_material_id = e.raw_material_id
+        WHERE e.order_id = \$1
+        ORDER BY r.name, e.product_barcode
+      ''', parameters: [orderId]);
+
+      // Siryolar bo'yicha guruhlash
+      final Map<int, Map<String, dynamic>> materialsMap = {};
+      for (final row in expRes) {
+        final matId = row[0] as int;
+        if (!materialsMap.containsKey(matId)) {
+          materialsMap[matId] = {
+            'material_id': matId,
+            'material_name': row[1],
+            'material_code': row[2],
+            'unit': row[3],
+            'total_kg': 0.0,
+            'items': [],
+          };
+        }
+        final kg = double.tryParse(row[6].toString()) ?? 0;
+        materialsMap[matId]!['total_kg'] = (materialsMap[matId]!['total_kg'] as double) + kg;
+        (materialsMap[matId]!['items'] as List).add({
+          'product_barcode': row[4],
+          'product_name': row[5],
+          'quantity_kg': row[6],
+          'product_qty': row[7],
+          'grams_per_unit': row[8],
+          'expense_date': row[9]?.toString(),
+        });
+      }
+
+      return Response.ok(jsonEncode({
+        'order': {
+          'id': order[0], 'order_number': order[1], 'country': order[2],
+          'company_name': order[3], 'contract_number': order[4],
+          'created_at': order[5]?.toString(),
+        },
+        'materials': materialsMap.values.toList(),
+      }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
     }
