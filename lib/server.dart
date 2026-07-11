@@ -742,6 +742,30 @@ void main() async {
     }
   });
 
+
+  // GET /api/product-materials-by-material/:material_id
+  router.get('/api/product-materials-by-material/<id>', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final result = await conn.execute('''
+        SELECT pm.*, p.name as product_name, p.category
+        FROM product_materials pm
+        LEFT JOIN products p ON p.barcode = pm.product_barcode
+        WHERE pm.raw_material_id = \$1
+        ORDER BY pm.product_barcode
+      ''', parameters: [int.parse(id)]);
+      final list = result.map((row) => {
+        'id': row[0], 'product_barcode': row[1], 'raw_material_id': row[2],
+        'grams_per_unit': row[3], 'is_active': row[4],
+        'active_from': row[5]?.toString(),
+        'product_name': row[6], 'category': row[7],
+      }).toList();
+      return Response.ok(jsonEncode(list), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
   // ─── MATERIAL EXPENSES (avtomatik) ───────────────────────────────────────────
 
   router.get('/api/material-expenses', (Request request) async {
