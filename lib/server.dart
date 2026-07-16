@@ -791,7 +791,8 @@ void main() async {
         'id': row[0], 'raw_material_id': row[1], 'order_id': row[2],
         'product_barcode': row[3], 'quantity_kg': row[4],
         'created_at': row[5]?.toString(),
-        'material_name': row[6], 'material_code': row[7], 'order_number': row[8],
+        'expense_date': row[6]?.toString(),
+        'material_name': row[7], 'material_code': row[8], 'order_number': row[9],
       }).toList();
       return Response.ok(jsonEncode(list), headers: {'Content-Type': 'application/json'});
     } catch (e) {
