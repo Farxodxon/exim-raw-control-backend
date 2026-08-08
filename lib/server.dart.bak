@@ -246,23 +246,12 @@ void main() async {
       await conn.execute('DROP TABLE IF EXISTS order_items CASCADE');
       await conn.execute('DROP TABLE IF EXISTS orders CASCADE');
       await conn.execute('''
-        CREATE TABLE IF NOT EXISTS partners (
-          id SERIAL PRIMARY KEY,
-          firma_nomi VARCHAR(200) NOT NULL,
-          firma_turi VARCHAR(150),
-          shartnoma_raqami VARCHAR(100),
-          davlati VARCHAR(100),
-          faolligi BOOLEAN NOT NULL DEFAULT true,
-          shartnoma_sanasi DATE,
-          created_at TIMESTAMP DEFAULT NOW()
-        )
-      ''');
-      await conn.execute('''
         CREATE TABLE orders (
           id SERIAL PRIMARY KEY,
           order_number VARCHAR(100),
-          partner_id INTEGER REFERENCES partners(id),
-          certification_number VARCHAR(100),
+          country VARCHAR(100),
+          company_name VARCHAR(200),
+          contract_number VARCHAR(100),
           created_at TIMESTAMP DEFAULT NOW()
         )
       ''');
@@ -291,23 +280,12 @@ void main() async {
     try {
       final conn = await DatabaseConnection.getConnection();
       await conn.execute('''
-        CREATE TABLE IF NOT EXISTS partners (
-          id SERIAL PRIMARY KEY,
-          firma_nomi VARCHAR(200) NOT NULL,
-          firma_turi VARCHAR(150),
-          shartnoma_raqami VARCHAR(100),
-          davlati VARCHAR(100),
-          faolligi BOOLEAN NOT NULL DEFAULT true,
-          shartnoma_sanasi DATE,
-          created_at TIMESTAMP DEFAULT NOW()
-        )
-      ''');
-      await conn.execute('''
         CREATE TABLE IF NOT EXISTS orders (
           id SERIAL PRIMARY KEY,
           order_number VARCHAR(50),
-          partner_id INTEGER REFERENCES partners(id),
-          certification_number VARCHAR(100),
+          country VARCHAR(100),
+          company_name VARCHAR(200),
+          contract_number VARCHAR(100),
           created_at TIMESTAMP DEFAULT NOW()
         )
       ''');
@@ -338,20 +316,17 @@ void main() async {
     try {
       final conn = await DatabaseConnection.getConnection();
       final result = await conn.execute(
-        '''SELECT o.id, o.order_number, o.partner_id, o.certification_number, o.created_at,
-          p.firma_nomi, p.davlati,
-          COUNT(oi.id) as total_items,
+        '''SELECT o.*, COUNT(oi.id) as total_items,
           SUM(CASE WHEN oi.found THEN 1 ELSE 0 END) as found_items
           FROM orders o
-          LEFT JOIN partners p ON p.id = o.partner_id
           LEFT JOIN order_items oi ON oi.order_id = o.id
-          GROUP BY o.id, p.firma_nomi, p.davlati ORDER BY o.created_at DESC'''
+          GROUP BY o.id ORDER BY o.created_at DESC'''
       );
       final orders = result.map((row) => {
-        'id': row[0], 'order_number': row[1], 'partner_id': row[2],
-        'certification_number': row[3], 'created_at': row[4]?.toString(),
-        'firma_nomi': row[5], 'davlati': row[6],
-        'total_items': row[7], 'found_items': row[8],
+        'id': row[0], 'order_number': row[1], 'country': row[2],
+        'company_name': row[3], 'contract_number': row[4],
+        'created_at': row[5]?.toString(),
+        'total_items': row[6], 'found_items': row[7],
       }).toList();
       return Response.ok(jsonEncode(orders), headers: {'Content-Type': 'application/json'});
     } catch (e) {
@@ -365,15 +340,14 @@ void main() async {
       final body = jsonDecode(await request.readAsString());
       final conn = await DatabaseConnection.getConnection();
       final result = await conn.execute(
-        '''INSERT INTO orders (order_number, partner_id, certification_number)
-          VALUES (\$1, \$2, \$3)
-          RETURNING id, order_number, partner_id, certification_number, created_at''',
-        parameters: [body['order_number'], body['partner_id'], body['certification_number']],
+        '''INSERT INTO orders (order_number, country, company_name, contract_number)
+          VALUES (\$1, \$2, \$3, \$4) RETURNING *''',
+        parameters: [body['order_number'], body['country'], body['company_name'], body['contract_number']],
       );
       final row = result.first;
       return Response.ok(jsonEncode({
-        'id': row[0], 'order_number': row[1], 'partner_id': row[2],
-        'certification_number': row[3], 'created_at': row[4]?.toString(),
+        'id': row[0], 'order_number': row[1], 'country': row[2],
+        'company_name': row[3], 'contract_number': row[4], 'created_at': row[5]?.toString(),
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
@@ -385,10 +359,7 @@ void main() async {
     try {
       final conn = await DatabaseConnection.getConnection();
       final orderRes = await conn.execute(
-        '''SELECT o.id, o.order_number, o.partner_id, o.certification_number, o.created_at,
-          p.firma_nomi, p.firma_turi, p.shartnoma_raqami, p.davlati, p.shartnoma_sanasi
-          FROM orders o LEFT JOIN partners p ON p.id = o.partner_id
-          WHERE o.id=\$1''', parameters: [int.parse(id)]);
+        'SELECT * FROM orders WHERE id=\$1', parameters: [int.parse(id)]);
       if (orderRes.isEmpty) {
         return Response(404, body: jsonEncode({'error': 'Topilmadi'}),
           headers: {'Content-Type': 'application/json'});
@@ -402,10 +373,8 @@ void main() async {
         'product_name': row[3], 'quantity': row[4], 'price_usd': row[5], 'found': row[6],
       }).toList();
       return Response.ok(jsonEncode({
-        'id': o[0], 'order_number': o[1], 'partner_id': o[2],
-        'certification_number': o[3], 'created_at': o[4]?.toString(),
-        'firma_nomi': o[5], 'firma_turi': o[6], 'shartnoma_raqami': o[7],
-        'davlati': o[8], 'shartnoma_sanasi': o[9]?.toString(),
+        'id': o[0], 'order_number': o[1], 'country': o[2],
+        'company_name': o[3], 'contract_number': o[4], 'created_at': o[5]?.toString(),
         'items': items,
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
@@ -445,88 +414,6 @@ void main() async {
     try {
       final conn = await DatabaseConnection.getConnection();
       await conn.execute('DELETE FROM orders WHERE id=\$1', parameters: [int.parse(id)]);
-      return Response.ok(jsonEncode({'message': "O'chirildi"}),
-        headers: {'Content-Type': 'application/json'});
-    } catch (e) {
-      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
-    }
-  });
-
-  // ─── PARTNERS (Hamkorlar) ─────────────────────────────────────────────────────
-
-  // GET /api/partners
-  router.get('/api/partners', (Request request) async {
-    try {
-      final conn = await DatabaseConnection.getConnection();
-      final result = await conn.execute('SELECT * FROM partners ORDER BY firma_nomi');
-      final partners = result.map((row) => {
-        'id': row[0], 'firma_nomi': row[1], 'firma_turi': row[2],
-        'shartnoma_raqami': row[3], 'davlati': row[4], 'faolligi': row[5],
-        'shartnoma_sanasi': row[6]?.toString(), 'created_at': row[7]?.toString(),
-      }).toList();
-      return Response.ok(jsonEncode(partners), headers: {'Content-Type': 'application/json'});
-    } catch (e) {
-      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
-    }
-  });
-
-  // POST /api/partners
-  router.post('/api/partners', (Request request) async {
-    try {
-      final body = jsonDecode(await request.readAsString());
-      final conn = await DatabaseConnection.getConnection();
-      final result = await conn.execute(
-        '''INSERT INTO partners (firma_nomi, firma_turi, shartnoma_raqami, davlati, faolligi, shartnoma_sanasi)
-          VALUES (\$1, \$2, \$3, \$4, \$5, \$6) RETURNING *''',
-        parameters: [
-          body['firma_nomi'], body['firma_turi'], body['shartnoma_raqami'],
-          body['davlati'], body['faolligi'] ?? true, body['shartnoma_sanasi'],
-        ],
-      );
-      final row = result.first;
-      return Response.ok(jsonEncode({
-        'id': row[0], 'firma_nomi': row[1], 'firma_turi': row[2],
-        'shartnoma_raqami': row[3], 'davlati': row[4], 'faolligi': row[5],
-        'shartnoma_sanasi': row[6]?.toString(), 'created_at': row[7]?.toString(),
-      }), headers: {'Content-Type': 'application/json'});
-    } catch (e) {
-      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
-    }
-  });
-
-  // PUT /api/partners/:id
-  router.put('/api/partners/<id>', (Request request, String id) async {
-    try {
-      final body = jsonDecode(await request.readAsString());
-      final conn = await DatabaseConnection.getConnection();
-      final result = await conn.execute(
-        '''UPDATE partners SET firma_nomi=\$1, firma_turi=\$2, shartnoma_raqami=\$3,
-          davlati=\$4, faolligi=\$5, shartnoma_sanasi=\$6 WHERE id=\$7 RETURNING *''',
-        parameters: [
-          body['firma_nomi'], body['firma_turi'], body['shartnoma_raqami'],
-          body['davlati'], body['faolligi'], body['shartnoma_sanasi'], int.parse(id),
-        ],
-      );
-      if (result.isEmpty) {
-        return Response(404, body: jsonEncode({'error': 'Topilmadi'}),
-          headers: {'Content-Type': 'application/json'});
-      }
-      final row = result.first;
-      return Response.ok(jsonEncode({
-        'id': row[0], 'firma_nomi': row[1], 'firma_turi': row[2],
-        'shartnoma_raqami': row[3], 'davlati': row[4], 'faolligi': row[5],
-        'shartnoma_sanasi': row[6]?.toString(), 'created_at': row[7]?.toString(),
-      }), headers: {'Content-Type': 'application/json'});
-    } catch (e) {
-      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
-    }
-  });
-
-  // DELETE /api/partners/:id
-  router.delete('/api/partners/<id>', (Request request, String id) async {
-    try {
-      final conn = await DatabaseConnection.getConnection();
-      await conn.execute('DELETE FROM partners WHERE id=\$1', parameters: [int.parse(id)]);
       return Response.ok(jsonEncode({'message': "O'chirildi"}),
         headers: {'Content-Type': 'application/json'});
     } catch (e) {
