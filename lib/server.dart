@@ -263,6 +263,7 @@ void main() async {
           order_number VARCHAR(100),
           partner_id INTEGER REFERENCES partners(id),
           certification_number VARCHAR(100),
+          order_date TIMESTAMP DEFAULT NOW(),
           created_at TIMESTAMP DEFAULT NOW()
         )
       ''');
@@ -308,6 +309,7 @@ void main() async {
           order_number VARCHAR(50),
           partner_id INTEGER REFERENCES partners(id),
           certification_number VARCHAR(100),
+          order_date TIMESTAMP DEFAULT NOW(),
           created_at TIMESTAMP DEFAULT NOW()
         )
       ''');
@@ -338,20 +340,20 @@ void main() async {
     try {
       final conn = await DatabaseConnection.getConnection();
       final result = await conn.execute(
-        '''SELECT o.id, o.order_number, o.partner_id, o.certification_number, o.created_at,
+        '''SELECT o.id, o.order_number, o.partner_id, o.certification_number, o.order_date, o.created_at,
           p.firma_nomi, p.davlati,
           COUNT(oi.id) as total_items,
           SUM(CASE WHEN oi.found THEN 1 ELSE 0 END) as found_items
           FROM orders o
           LEFT JOIN partners p ON p.id = o.partner_id
           LEFT JOIN order_items oi ON oi.order_id = o.id
-          GROUP BY o.id, p.firma_nomi, p.davlati ORDER BY o.created_at DESC'''
+          GROUP BY o.id, p.firma_nomi, p.davlati ORDER BY o.order_date DESC'''
       );
       final orders = result.map((row) => {
         'id': row[0], 'order_number': row[1], 'partner_id': row[2],
-        'certification_number': row[3], 'created_at': row[4]?.toString(),
-        'firma_nomi': row[5], 'davlati': row[6],
-        'total_items': row[7], 'found_items': row[8],
+        'certification_number': row[3], 'order_date': row[4]?.toString(), 'created_at': row[5]?.toString(),
+        'firma_nomi': row[6], 'davlati': row[7],
+        'total_items': row[8], 'found_items': row[9],
       }).toList();
       return Response.ok(jsonEncode(orders), headers: {'Content-Type': 'application/json'});
     } catch (e) {
@@ -365,15 +367,17 @@ void main() async {
       final body = jsonDecode(await request.readAsString());
       final conn = await DatabaseConnection.getConnection();
       final result = await conn.execute(
-        '''INSERT INTO orders (order_number, partner_id, certification_number)
-          VALUES (\$1, \$2, \$3)
-          RETURNING id, order_number, partner_id, certification_number, created_at''',
-        parameters: [body['order_number'], body['partner_id'], body['certification_number']],
+        '''INSERT INTO orders (order_number, partner_id, certification_number, order_date)
+          VALUES (\$1, \$2, \$3, COALESCE(\$4::timestamp, NOW()))
+          RETURNING id, order_number, partner_id, certification_number, order_date, created_at''',
+        parameters: [
+          body['order_number'], body['partner_id'], body['certification_number'], body['order_date'],
+        ],
       );
       final row = result.first;
       return Response.ok(jsonEncode({
         'id': row[0], 'order_number': row[1], 'partner_id': row[2],
-        'certification_number': row[3], 'created_at': row[4]?.toString(),
+        'certification_number': row[3], 'order_date': row[4]?.toString(), 'created_at': row[5]?.toString(),
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
@@ -385,7 +389,7 @@ void main() async {
     try {
       final conn = await DatabaseConnection.getConnection();
       final orderRes = await conn.execute(
-        '''SELECT o.id, o.order_number, o.partner_id, o.certification_number, o.created_at,
+        '''SELECT o.id, o.order_number, o.partner_id, o.certification_number, o.order_date, o.created_at,
           p.firma_nomi, p.firma_turi, p.shartnoma_raqami, p.davlati, p.shartnoma_sanasi
           FROM orders o LEFT JOIN partners p ON p.id = o.partner_id
           WHERE o.id=\$1''', parameters: [int.parse(id)]);
@@ -403,9 +407,9 @@ void main() async {
       }).toList();
       return Response.ok(jsonEncode({
         'id': o[0], 'order_number': o[1], 'partner_id': o[2],
-        'certification_number': o[3], 'created_at': o[4]?.toString(),
-        'firma_nomi': o[5], 'firma_turi': o[6], 'shartnoma_raqami': o[7],
-        'davlati': o[8], 'shartnoma_sanasi': o[9]?.toString(),
+        'certification_number': o[3], 'order_date': o[4]?.toString(), 'created_at': o[5]?.toString(),
+        'firma_nomi': o[6], 'firma_turi': o[7], 'shartnoma_raqami': o[8],
+        'davlati': o[9], 'shartnoma_sanasi': o[10]?.toString(),
         'items': items,
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
