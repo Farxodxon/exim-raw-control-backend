@@ -974,7 +974,10 @@ void main() async {
 
       // Buyurtma ma'lumotlari
       final orderRes = await conn.execute(
-        'SELECT * FROM orders WHERE id=\$1', parameters: [orderId]);
+        '''SELECT o.id, o.order_number, o.partner_id, o.certification_number, o.order_date, o.created_at,
+          p.firma_nomi, p.firma_turi, p.shartnoma_raqami, p.davlati
+          FROM orders o LEFT JOIN partners p ON p.id = o.partner_id
+          WHERE o.id=\$1''', parameters: [orderId]);
       if (orderRes.isEmpty) {
         return Response(404, body: jsonEncode({'error': 'Topilmadi'}),
           headers: {'Content-Type': 'application/json'});
@@ -1031,9 +1034,11 @@ void main() async {
 
       return Response.ok(jsonEncode({
         'order': {
-          'id': order[0], 'order_number': order[1], 'country': order[2],
-          'company_name': order[3], 'contract_number': order[4],
+          'id': order[0], 'order_number': order[1], 'partner_id': order[2],
+          'certification_number': order[3], 'order_date': order[4]?.toString(),
           'created_at': order[5]?.toString(),
+          'firma_nomi': order[6], 'firma_turi': order[7],
+          'shartnoma_raqami': order[8], 'davlati': order[9],
         },
         'materials': materialsMap.values.toList(),
       }), headers: {'Content-Type': 'application/json'});
