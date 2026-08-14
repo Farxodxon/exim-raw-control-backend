@@ -1047,6 +1047,76 @@ void main() async {
     }
   });
 
+  // GET /api/orders/:id/dalolatnoma-data — kategoriya bo'yicha guruhlangan xomashyo hisoboti
+  router.get('/api/orders/<id>/dalolatnoma-data', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final orderId = int.parse(id);
+
+      final orderRes = await conn.execute(
+        '''SELECT o.id, o.order_number, o.partner_id, o.certification_number, o.order_date,
+          p.firma_nomi, p.firma_turi, p.shartnoma_raqami, p.davlati, p.shartnoma_sanasi
+          FROM orders o LEFT JOIN partners p ON p.id = o.partner_id
+          WHERE o.id=\$1''', parameters: [orderId]);
+      if (orderRes.isEmpty) {
+        return Response(404, body: jsonEncode({'error': 'Topilmadi'}),
+          headers: {'Content-Type': 'application/json'});
+      }
+      final o = orderRes.first;
+
+      final pcsRes = await conn.execute('''
+        SELECT COALESCE(p.category, 'Boshqa'), SUM(oi.quantity)
+        FROM order_items oi
+        LEFT JOIN products p ON p.barcode = oi.barcode
+        WHERE oi.order_id = \$1 AND oi.found = true
+        GROUP BY COALESCE(p.category, 'Boshqa')
+      ''', parameters: [orderId]);
+      final Map<String, int> categoryPcs = {
+        for (final row in pcsRes) row[0].toString(): (row[1] as num).toInt()
+      };
+
+      final matRes = await conn.execute('''
+        SELECT COALESCE(p.category, 'Boshqa') as category, r.id, r.name, r.unit, SUM(e.quantity_kg)
+        FROM material_expenses e
+        LEFT JOIN products p ON p.barcode = e.product_barcode
+        JOIN raw_materials r ON r.id = e.raw_material_id
+        WHERE e.order_id = \$1
+        GROUP BY COALESCE(p.category, 'Boshqa'), r.id, r.name, r.unit
+        ORDER BY category, r.name
+      ''', parameters: [orderId]);
+
+      final Map<String, List<Map<String, dynamic>>> categoryMaterials = {};
+      for (final row in matRes) {
+        final cat = row[0].toString();
+        categoryMaterials.putIfAbsent(cat, () => []);
+        categoryMaterials[cat]!.add({
+          'material_id': row[1],
+          'material_name': row[2],
+          'unit': row[3],
+          'total_kg': double.tryParse(row[4].toString()) ?? 0,
+        });
+      }
+
+      final categories = categoryMaterials.keys.map((cat) => {
+        'category': cat,
+        'total_pcs': categoryPcs[cat] ?? 0,
+        'materials': categoryMaterials[cat],
+      }).toList();
+
+      return Response.ok(jsonEncode({
+        'order': {
+          'id': o[0], 'order_number': o[1], 'partner_id': o[2],
+          'certification_number': o[3], 'order_date': o[4]?.toString(),
+          'firma_nomi': o[5], 'firma_turi': o[6],
+          'shartnoma_raqami': o[7], 'davlati': o[8], 'shartnoma_sanasi': o[9]?.toString(),
+        },
+        'categories': categories,
+      }), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
   // ─── CORS HANDLER ────────────────────────────────────────────────────────────
   final handler = (Request request) async {
     if (request.method == 'OPTIONS') {
