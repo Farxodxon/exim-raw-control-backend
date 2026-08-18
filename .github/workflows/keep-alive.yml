@@ -1,0 +1,19 @@
+name: Keep Render server awake
+
+on:
+  schedule:
+    # Har 10 daqiqada ishga tushadi (Render bepul tarifi 15 daqiqadan keyin uxlaydi)
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}  # qo'lda ham ishga tushirish imkoni
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://exim-raw-api.onrender.com/health)
+          echo "Health check javobi: $response"
+          if [ "$response" != "200" ]; then
+            echo "Ogohlantirish: server 200 emas, $response qaytardi"
+          fi
