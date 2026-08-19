@@ -849,10 +849,12 @@ void main() async {
       final params = request.url.queryParameters;
       String sql = '''
         SELECT e.*, r.name as material_name, r.code as material_code,
-          o.order_number
+          o.order_number, o.certification_number,
+          p.firma_nomi, p.davlati
         FROM material_expenses e
         JOIN raw_materials r ON r.id = e.raw_material_id
         LEFT JOIN orders o ON o.id = e.order_id
+        LEFT JOIN partners p ON p.id = o.partner_id
         WHERE 1=1
       ''';
       final List<Object?> args = [];
@@ -868,6 +870,7 @@ void main() async {
         'created_at': row[5]?.toString(),
         'expense_date': row[6]?.toString(),
         'material_name': row[7], 'material_code': row[8], 'order_number': row[9],
+        'certification_number': row[10], 'firma_nomi': row[11], 'davlati': row[12],
       }).toList();
       return Response.ok(jsonEncode(list), headers: {'Content-Type': 'application/json'});
     } catch (e) {
