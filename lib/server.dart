@@ -84,7 +84,7 @@ void main() async {
         idx += 2;
       }
       if (category.isNotEmpty) {
-        sql += ' AND category = \\${idx}';
+        sql += ' AND category = \$${idx}';
         args.add(category);
         idx++;
       }
