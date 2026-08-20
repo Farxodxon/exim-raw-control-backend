@@ -70,30 +70,47 @@ void main() async {
     try {
       final params = request.url.queryParameters;
       final search = params['search'] ?? '';
-      final category = params['category'] ?? '';
+      final categoryId = params['category_id'] ?? '';
+      final mainCategoryId = params['main_category_id'] ?? '';
       final conn = await DatabaseConnection.getConnection();
 
-      String sql = 'SELECT * FROM products WHERE 1=1';
+      String sql = '''
+        SELECT p.id, p.barcode, p.name, p.category, p.tnved, p.pcs_in_box, p.price_usd, p.netto_per_piece,
+          p.category_id, c2.name AS series_name, c1.id AS main_category_id, c1.name AS main_category_name,
+          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3
+        FROM products p
+        LEFT JOIN product_categories c2 ON c2.id = p.category_id
+        LEFT JOIN product_categories c1 ON c1.id = c2.parent_id
+        WHERE 1=1
+      ''';
       final List<Object?> args = [];
       int idx = 1;
 
       if (search.isNotEmpty) {
-       sql += ' AND (name ILIKE \$${idx} OR barcode ILIKE \$${idx + 1})';
+        sql += ' AND (p.name ILIKE \$${idx} OR p.barcode ILIKE \$${idx + 1})';
         args.add('%\$search%');
         args.add('%\$search%');
         idx += 2;
       }
-      if (category.isNotEmpty) {
-        sql += ' AND category = \$${idx}';
-        args.add(category);
+      if (categoryId.isNotEmpty) {
+        sql += ' AND p.category_id = \$${idx}';
+        args.add(int.parse(categoryId));
         idx++;
       }
-      sql += ' ORDER BY category, name';
+      if (mainCategoryId.isNotEmpty) {
+        sql += ' AND c1.id = \$${idx}';
+        args.add(int.parse(mainCategoryId));
+        idx++;
+      }
+      sql += ' ORDER BY c1.name, c2.name, p.name';
 
       final result = await conn.execute(sql, parameters: args);
       final products = result.map((row) => {
         'id': row[0], 'barcode': row[1], 'name': row[2], 'category': row[3],
         'tnved': row[4], 'pcs_in_box': row[5], 'price_usd': row[6], 'netto_per_piece': row[7],
+        'category_id': row[8], 'series_name': row[9], 'main_category_id': row[10], 'main_category_name': row[11],
+        'box_length_cm': row[12]?.toString(), 'box_width_cm': row[13]?.toString(), 'box_height_cm': row[14]?.toString(),
+        'box_netto_kg': row[15]?.toString(), 'box_brutto_kg': row[16]?.toString(), 'box_volume_m3': row[17]?.toString(),
       }).toList();
       return Response.ok(jsonEncode(products), headers: {'Content-Type': 'application/json'});
     } catch (e) {
@@ -105,10 +122,23 @@ void main() async {
   router.get('/api/products/categories', (Request request) async {
     try {
       final conn = await DatabaseConnection.getConnection();
-      final result = await conn.execute(
-        'SELECT DISTINCT category FROM products WHERE category IS NOT NULL ORDER BY category');
-      final cats = result.map((row) => row[0] as String).toList();
-      return Response.ok(jsonEncode(cats), headers: {'Content-Type': 'application/json'});
+      final result = await conn.execute('''
+        SELECT c1.id, c1.name, c2.id, c2.name
+        FROM product_categories c1
+        LEFT JOIN product_categories c2 ON c2.parent_id = c1.id
+        WHERE c1.parent_id IS NULL
+        ORDER BY c1.name, c2.name
+      ''');
+      final Map<int, Map<String, dynamic>> tree = {};
+      for (final row in result) {
+        final mainId = row[0] as int;
+        final mainName = row[1] as String;
+        tree.putIfAbsent(mainId, () => {'id': mainId, 'name': mainName, 'series': []});
+        if (row[2] != null) {
+          (tree[mainId]!['series'] as List).add({'id': row[2], 'name': row[3]});
+        }
+      }
+      return Response.ok(jsonEncode(tree.values.toList()), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
     }
@@ -118,8 +148,15 @@ void main() async {
   router.get('/api/products/barcode/<barcode>', (Request request, String barcode) async {
     try {
       final conn = await DatabaseConnection.getConnection();
-      final result = await conn.execute(
-        'SELECT * FROM products WHERE barcode = \$1', parameters: [barcode]);
+      final result = await conn.execute('''
+        SELECT p.id, p.barcode, p.name, p.category, p.tnved, p.pcs_in_box, p.price_usd, p.netto_per_piece,
+          p.category_id, c2.name AS series_name, c1.id AS main_category_id, c1.name AS main_category_name,
+          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3
+        FROM products p
+        LEFT JOIN product_categories c2 ON c2.id = p.category_id
+        LEFT JOIN product_categories c1 ON c1.id = c2.parent_id
+        WHERE p.barcode = \$1
+      ''', parameters: [barcode]);
       if (result.isEmpty) {
         return Response.notFound(jsonEncode({'error': 'Topilmadi'}),
           headers: {'Content-Type': 'application/json'});
@@ -128,6 +165,9 @@ void main() async {
       return Response.ok(jsonEncode({
         'id': row[0], 'barcode': row[1], 'name': row[2], 'category': row[3],
         'tnved': row[4], 'pcs_in_box': row[5], 'price_usd': row[6], 'netto_per_piece': row[7],
+        'category_id': row[8], 'series_name': row[9], 'main_category_id': row[10], 'main_category_name': row[11],
+        'box_length_cm': row[12]?.toString(), 'box_width_cm': row[13]?.toString(), 'box_height_cm': row[14]?.toString(),
+        'box_netto_kg': row[15]?.toString(), 'box_brutto_kg': row[16]?.toString(), 'box_volume_m3': row[17]?.toString(),
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
@@ -143,16 +183,32 @@ void main() async {
           headers: {'Content-Type': 'application/json'});
       }
       final conn = await DatabaseConnection.getConnection();
-      final result = await conn.execute(
-        'INSERT INTO products (barcode, name, category, tnved, pcs_in_box, price_usd, netto_per_piece) '
-        'VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7) RETURNING *',
+      final insertResult = await conn.execute(
+        'INSERT INTO products (barcode, name, category, tnved, pcs_in_box, price_usd, netto_per_piece, '
+        'category_id, box_length_cm, box_width_cm, box_height_cm, box_netto_kg, box_brutto_kg) '
+        'VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13) RETURNING id',
         parameters: [body['barcode'], body['name'], body['category'], body['tnved'],
-          body['pcs_in_box'], body['price_usd'], body['netto_per_piece']],
+          body['pcs_in_box'], body['price_usd'], body['netto_per_piece'],
+          body['category_id'], body['box_length_cm'], body['box_width_cm'], body['box_height_cm'],
+          body['box_netto_kg'], body['box_brutto_kg']],
       );
+      final newId = insertResult.first[0];
+      final result = await conn.execute('''
+        SELECT p.id, p.barcode, p.name, p.category, p.tnved, p.pcs_in_box, p.price_usd, p.netto_per_piece,
+          p.category_id, c2.name AS series_name, c1.id AS main_category_id, c1.name AS main_category_name,
+          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3
+        FROM products p
+        LEFT JOIN product_categories c2 ON c2.id = p.category_id
+        LEFT JOIN product_categories c1 ON c1.id = c2.parent_id
+        WHERE p.id = \$1
+      ''', parameters: [newId]);
       final row = result.first;
       return Response.ok(jsonEncode({
         'id': row[0], 'barcode': row[1], 'name': row[2], 'category': row[3],
         'tnved': row[4], 'pcs_in_box': row[5], 'price_usd': row[6], 'netto_per_piece': row[7],
+        'category_id': row[8], 'series_name': row[9], 'main_category_id': row[10], 'main_category_name': row[11],
+        'box_length_cm': row[12]?.toString(), 'box_width_cm': row[13]?.toString(), 'box_height_cm': row[14]?.toString(),
+        'box_netto_kg': row[15]?.toString(), 'box_brutto_kg': row[16]?.toString(), 'box_volume_m3': row[17]?.toString(),
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       final msg = e.toString();
@@ -169,20 +225,36 @@ void main() async {
     try {
       final body = jsonDecode(await request.readAsString());
       final conn = await DatabaseConnection.getConnection();
-      final result = await conn.execute(
+      final updateResult = await conn.execute(
         'UPDATE products SET barcode=\$1, name=\$2, category=\$3, tnved=\$4, '
-        'pcs_in_box=\$5, price_usd=\$6, netto_per_piece=\$7 WHERE id=\$8 RETURNING *',
+        'pcs_in_box=\$5, price_usd=\$6, netto_per_piece=\$7, category_id=\$8, '
+        'box_length_cm=\$9, box_width_cm=\$10, box_height_cm=\$11, box_netto_kg=\$12, box_brutto_kg=\$13, '
+        'updated_at=NOW() WHERE id=\$14 RETURNING id',
         parameters: [body['barcode'], body['name'], body['category'], body['tnved'],
-          body['pcs_in_box'], body['price_usd'], body['netto_per_piece'], int.parse(id)],
+          body['pcs_in_box'], body['price_usd'], body['netto_per_piece'],
+          body['category_id'], body['box_length_cm'], body['box_width_cm'], body['box_height_cm'],
+          body['box_netto_kg'], body['box_brutto_kg'], int.parse(id)],
       );
-      if (result.isEmpty) {
+      if (updateResult.isEmpty) {
         return Response(404, body: jsonEncode({'error': 'Mahsulot topilmadi'}),
           headers: {'Content-Type': 'application/json'});
       }
+      final result = await conn.execute('''
+        SELECT p.id, p.barcode, p.name, p.category, p.tnved, p.pcs_in_box, p.price_usd, p.netto_per_piece,
+          p.category_id, c2.name AS series_name, c1.id AS main_category_id, c1.name AS main_category_name,
+          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3
+        FROM products p
+        LEFT JOIN product_categories c2 ON c2.id = p.category_id
+        LEFT JOIN product_categories c1 ON c1.id = c2.parent_id
+        WHERE p.id = \$1
+      ''', parameters: [int.parse(id)]);
       final row = result.first;
       return Response.ok(jsonEncode({
         'id': row[0], 'barcode': row[1], 'name': row[2], 'category': row[3],
         'tnved': row[4], 'pcs_in_box': row[5], 'price_usd': row[6], 'netto_per_piece': row[7],
+        'category_id': row[8], 'series_name': row[9], 'main_category_id': row[10], 'main_category_name': row[11],
+        'box_length_cm': row[12]?.toString(), 'box_width_cm': row[13]?.toString(), 'box_height_cm': row[14]?.toString(),
+        'box_netto_kg': row[15]?.toString(), 'box_brutto_kg': row[16]?.toString(), 'box_volume_m3': row[17]?.toString(),
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
