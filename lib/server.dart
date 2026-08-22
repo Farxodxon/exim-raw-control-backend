@@ -1122,6 +1122,81 @@ void main() async {
     }
   });
 
+  // GET /api/orders/:id/tir-data — TIR hujjati uchun ma'lumot
+  router.get('/api/orders/<id>/tir-data', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final orderId = int.parse(id);
+
+      final orderRes = await conn.execute('''
+        SELECT o.id, o.order_number, o.certification_number, o.order_date,
+          p.firma_nomi, p.davlati
+        FROM orders o
+        LEFT JOIN partners p ON p.id = o.partner_id
+        WHERE o.id = \$1
+      ''', parameters: [orderId]);
+      if (orderRes.isEmpty) {
+        return Response.notFound(jsonEncode({'error': 'Buyurtma topilmadi'}),
+          headers: {'Content-Type': 'application/json'});
+      }
+      final orderRow = orderRes.first;
+
+      final itemsRes = await conn.execute('''
+        SELECT oi.barcode, oi.quantity, p.pcs_in_box, p.box_brutto_kg, p.tnved,
+          c1.name AS main_category_name
+        FROM order_items oi
+        JOIN products p ON p.barcode = oi.barcode
+        LEFT JOIN product_categories c2 ON c2.id = p.category_id
+        LEFT JOIN product_categories c1 ON c1.id = c2.parent_id
+        WHERE oi.order_id = \$1 AND oi.found = true AND oi.quantity > 0
+      ''', parameters: [orderId]);
+
+      int totalBoxes = 0;
+      double totalWeightBrutto = 0;
+      // tnved -> {boxes, weight, labels}
+      final Map<String, Map<String, dynamic>> groups = {};
+
+      for (final row in itemsRes) {
+        final qty = (row[1] as num).toInt();
+        final pcsInBox = row[2] != null ? (row[2] as num).toInt() : null;
+        final boxBrutto = row[3] != null ? double.tryParse(row[3].toString()) : null;
+        final tnved = row[4]?.toString() ?? "noma'lum";
+        final categoryLabel = row[5]?.toString() ?? "Boshqa";
+
+        if (pcsInBox == null || pcsInBox <= 0) continue;
+        final boxes = (qty / pcsInBox).ceil();
+        final weight = boxBrutto != null ? boxes * boxBrutto : 0.0;
+
+        totalBoxes += boxes;
+        totalWeightBrutto += weight;
+
+        groups.putIfAbsent(tnved, () => {'tnved': tnved, 'boxes': 0, 'weight': 0.0, 'labels': <String>{}});
+        groups[tnved]!['boxes'] = (groups[tnved]!['boxes'] as int) + boxes;
+        groups[tnved]!['weight'] = (groups[tnved]!['weight'] as double) + weight;
+        (groups[tnved]!['labels'] as Set<String>).add(categoryLabel);
+      }
+
+      final groupList = groups.values.map((g) => {
+        'tnved': g['tnved'],
+        'category_label': (g['labels'] as Set<String>).join(', '),
+        'boxes': g['boxes'],
+        'weight_brutto': double.parse((g['weight'] as double).toStringAsFixed(2)),
+      }).toList();
+
+      return Response.ok(jsonEncode({
+        'order': {
+          'id': orderRow[0], 'order_number': orderRow[1], 'certification_number': orderRow[2],
+          'order_date': orderRow[3]?.toString(), 'firma_nomi': orderRow[4], 'davlati': orderRow[5],
+        },
+        'total_boxes': totalBoxes,
+        'total_weight_brutto': double.parse(totalWeightBrutto.toStringAsFixed(2)),
+        'groups': groupList,
+      }), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
   // GET /api/orders/:id/dalolatnoma-data — kategoriya bo'yicha guruhlangan xomashyo hisoboti
   router.get('/api/orders/<id>/dalolatnoma-data', (Request request, String id) async {
     try {
