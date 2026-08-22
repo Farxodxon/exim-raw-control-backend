@@ -77,7 +77,8 @@ void main() async {
       String sql = '''
         SELECT p.id, p.barcode, p.name, p.category, p.tnved, p.pcs_in_box, p.price_usd, p.netto_per_piece,
           p.category_id, c2.name AS series_name, c1.id AS main_category_id, c1.name AS main_category_name,
-          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3
+          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3,
+          p.composition_text
         FROM products p
         LEFT JOIN product_categories c2 ON c2.id = p.category_id
         LEFT JOIN product_categories c1 ON c1.id = c2.parent_id
@@ -111,6 +112,7 @@ void main() async {
         'category_id': row[8], 'series_name': row[9], 'main_category_id': row[10], 'main_category_name': row[11],
         'box_length_cm': row[12]?.toString(), 'box_width_cm': row[13]?.toString(), 'box_height_cm': row[14]?.toString(),
         'box_netto_kg': row[15]?.toString(), 'box_brutto_kg': row[16]?.toString(), 'box_volume_m3': row[17]?.toString(),
+        'composition_text': row[18]?.toString(),
       }).toList();
       return Response.ok(jsonEncode(products), headers: {'Content-Type': 'application/json'});
     } catch (e) {
@@ -151,7 +153,8 @@ void main() async {
       final result = await conn.execute('''
         SELECT p.id, p.barcode, p.name, p.category, p.tnved, p.pcs_in_box, p.price_usd, p.netto_per_piece,
           p.category_id, c2.name AS series_name, c1.id AS main_category_id, c1.name AS main_category_name,
-          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3
+          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3,
+          p.composition_text
         FROM products p
         LEFT JOIN product_categories c2 ON c2.id = p.category_id
         LEFT JOIN product_categories c1 ON c1.id = c2.parent_id
@@ -168,6 +171,7 @@ void main() async {
         'category_id': row[8], 'series_name': row[9], 'main_category_id': row[10], 'main_category_name': row[11],
         'box_length_cm': row[12]?.toString(), 'box_width_cm': row[13]?.toString(), 'box_height_cm': row[14]?.toString(),
         'box_netto_kg': row[15]?.toString(), 'box_brutto_kg': row[16]?.toString(), 'box_volume_m3': row[17]?.toString(),
+        'composition_text': row[18]?.toString(),
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
@@ -185,18 +189,19 @@ void main() async {
       final conn = await DatabaseConnection.getConnection();
       final insertResult = await conn.execute(
         'INSERT INTO products (barcode, name, category, tnved, pcs_in_box, price_usd, netto_per_piece, '
-        'category_id, box_length_cm, box_width_cm, box_height_cm, box_netto_kg, box_brutto_kg) '
-        'VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13) RETURNING id',
+        'category_id, box_length_cm, box_width_cm, box_height_cm, box_netto_kg, box_brutto_kg, composition_text) '
+        'VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14) RETURNING id',
         parameters: [body['barcode'], body['name'], body['category'], body['tnved'],
           body['pcs_in_box'], body['price_usd'], body['netto_per_piece'],
           body['category_id'], body['box_length_cm'], body['box_width_cm'], body['box_height_cm'],
-          body['box_netto_kg'], body['box_brutto_kg']],
+          body['box_netto_kg'], body['box_brutto_kg'], body['composition_text']],
       );
       final newId = insertResult.first[0];
       final result = await conn.execute('''
         SELECT p.id, p.barcode, p.name, p.category, p.tnved, p.pcs_in_box, p.price_usd, p.netto_per_piece,
           p.category_id, c2.name AS series_name, c1.id AS main_category_id, c1.name AS main_category_name,
-          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3
+          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3,
+          p.composition_text
         FROM products p
         LEFT JOIN product_categories c2 ON c2.id = p.category_id
         LEFT JOIN product_categories c1 ON c1.id = c2.parent_id
@@ -209,6 +214,7 @@ void main() async {
         'category_id': row[8], 'series_name': row[9], 'main_category_id': row[10], 'main_category_name': row[11],
         'box_length_cm': row[12]?.toString(), 'box_width_cm': row[13]?.toString(), 'box_height_cm': row[14]?.toString(),
         'box_netto_kg': row[15]?.toString(), 'box_brutto_kg': row[16]?.toString(), 'box_volume_m3': row[17]?.toString(),
+        'composition_text': row[18]?.toString(),
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       final msg = e.toString();
@@ -229,11 +235,11 @@ void main() async {
         'UPDATE products SET barcode=\$1, name=\$2, category=\$3, tnved=\$4, '
         'pcs_in_box=\$5, price_usd=\$6, netto_per_piece=\$7, category_id=\$8, '
         'box_length_cm=\$9, box_width_cm=\$10, box_height_cm=\$11, box_netto_kg=\$12, box_brutto_kg=\$13, '
-        'updated_at=NOW() WHERE id=\$14 RETURNING id',
+        'composition_text=\$14, updated_at=NOW() WHERE id=\$15 RETURNING id',
         parameters: [body['barcode'], body['name'], body['category'], body['tnved'],
           body['pcs_in_box'], body['price_usd'], body['netto_per_piece'],
           body['category_id'], body['box_length_cm'], body['box_width_cm'], body['box_height_cm'],
-          body['box_netto_kg'], body['box_brutto_kg'], int.parse(id)],
+          body['box_netto_kg'], body['box_brutto_kg'], body['composition_text'], int.parse(id)],
       );
       if (updateResult.isEmpty) {
         return Response(404, body: jsonEncode({'error': 'Mahsulot topilmadi'}),
@@ -242,7 +248,8 @@ void main() async {
       final result = await conn.execute('''
         SELECT p.id, p.barcode, p.name, p.category, p.tnved, p.pcs_in_box, p.price_usd, p.netto_per_piece,
           p.category_id, c2.name AS series_name, c1.id AS main_category_id, c1.name AS main_category_name,
-          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3
+          p.box_length_cm, p.box_width_cm, p.box_height_cm, p.box_netto_kg, p.box_brutto_kg, p.box_volume_m3,
+          p.composition_text
         FROM products p
         LEFT JOIN product_categories c2 ON c2.id = p.category_id
         LEFT JOIN product_categories c1 ON c1.id = c2.parent_id
@@ -255,6 +262,7 @@ void main() async {
         'category_id': row[8], 'series_name': row[9], 'main_category_id': row[10], 'main_category_name': row[11],
         'box_length_cm': row[12]?.toString(), 'box_width_cm': row[13]?.toString(), 'box_height_cm': row[14]?.toString(),
         'box_netto_kg': row[15]?.toString(), 'box_brutto_kg': row[16]?.toString(), 'box_volume_m3': row[17]?.toString(),
+        'composition_text': row[18]?.toString(),
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
