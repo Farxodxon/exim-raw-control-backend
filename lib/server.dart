@@ -1130,6 +1130,64 @@ void main() async {
     }
   });
 
+  // GET /api/orders/:id/invoice-data — Schyot-faktura uchun ma'lumot
+  router.get('/api/orders/<id>/invoice-data', (Request request, String id) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final orderId = int.parse(id);
+
+      final orderRes = await conn.execute('''
+        SELECT o.id, o.order_number, o.certification_number, o.order_date,
+          p.firma_nomi, p.davlati, p.shartnoma_raqami, p.shartnoma_sanasi
+        FROM orders o
+        LEFT JOIN partners p ON p.id = o.partner_id
+        WHERE o.id = \$1
+      ''', parameters: [orderId]);
+      if (orderRes.isEmpty) {
+        return Response.notFound(jsonEncode({'error': 'Buyurtma topilmadi'}),
+          headers: {'Content-Type': 'application/json'});
+      }
+      final orderRow = orderRes.first;
+
+      final itemsRes = await conn.execute('''
+        SELECT oi.barcode, p.name, p.composition_text, oi.quantity, p.pcs_in_box,
+          p.price_usd, p.tnved
+        FROM order_items oi
+        JOIN products p ON p.barcode = oi.barcode
+        WHERE oi.order_id = \$1 AND oi.found = true AND oi.quantity > 0
+        ORDER BY p.category, p.name
+      ''', parameters: [orderId]);
+
+      final items = itemsRes.map((row) {
+        final qty = (row[3] as num).toInt();
+        final pcsInBox = row[4] != null ? (row[4] as num).toInt() : null;
+        final priceUsd = row[5] != null ? double.tryParse(row[5].toString()) ?? 0 : 0.0;
+        final boxes = (pcsInBox != null && pcsInBox > 0) ? (qty / pcsInBox).ceil() : null;
+        return {
+          'barcode': row[0],
+          'name': row[1],
+          'composition_text': row[2],
+          'quantity': qty,
+          'pcs_in_box': pcsInBox,
+          'boxes': boxes,
+          'price_usd': priceUsd,
+          'tnved': row[6],
+        };
+      }).toList();
+
+      return Response.ok(jsonEncode({
+        'order': {
+          'id': orderRow[0], 'order_number': orderRow[1], 'certification_number': orderRow[2],
+          'order_date': orderRow[3]?.toString(), 'firma_nomi': orderRow[4], 'davlati': orderRow[5],
+          'shartnoma_raqami': orderRow[6], 'shartnoma_sanasi': orderRow[7]?.toString(),
+        },
+        'items': items,
+      }), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
   // GET /api/orders/:id/tir-data — TIR hujjati uchun ma'lumot
   router.get('/api/orders/<id>/tir-data', (Request request, String id) async {
     try {
