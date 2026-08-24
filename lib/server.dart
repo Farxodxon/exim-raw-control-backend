@@ -1151,7 +1151,7 @@ void main() async {
 
       final itemsRes = await conn.execute('''
         SELECT oi.barcode, p.name, p.composition_text, oi.quantity, p.pcs_in_box,
-          p.price_usd, p.tnved
+          p.price_usd, p.tnved, p.box_netto_kg, p.box_brutto_kg
         FROM order_items oi
         JOIN products p ON p.barcode = oi.barcode
         WHERE oi.order_id = \$1 AND oi.found = true AND oi.quantity > 0
@@ -1172,6 +1172,8 @@ void main() async {
           'boxes': boxes,
           'price_usd': priceUsd,
           'tnved': row[6],
+          'box_netto_kg': row[7]?.toString(),
+          'box_brutto_kg': row[8]?.toString(),
         };
       }).toList();
 
