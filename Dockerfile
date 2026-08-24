@@ -1,5 +1,5 @@
 # Use Dart SDK image
-FROM dart:3.2-sdk
+FROM dart:3.12-sdk
 
 # Set working directory
 WORKDIR /app
