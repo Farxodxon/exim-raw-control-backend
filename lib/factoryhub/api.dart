@@ -1,0 +1,1465 @@
+﻿import 'dart:convert';
+import 'package:shelf/shelf.dart';
+import 'package:shelf_router/shelf_router.dart';
+import 'package:exim_raw_backend/database/connection.dart';
+import 'package:exim_raw_backend/factoryhub/jwt.dart';
+import 'package:exim_raw_backend/factoryhub/policy.dart';
+import 'package:exim_raw_backend/factoryhub/user_storage.dart';
+
+final Router _router = Router().._registerRoutes();
+
+Handler fhHandler = const Pipeline()
+    .addMiddleware(_authMiddleware)
+    .addHandler(_router.call);
+
+Response _json(Object? body, {int status = 200}) => Response(
+      status,
+      body: jsonEncode(body),
+      headers: {'Content-Type': 'application/json'},
+    );
+
+Future<Map<String, dynamic>> _body(Request request) async =>
+    jsonDecode(await request.readAsString()) as Map<String, dynamic>;
+
+Map<String, dynamic> _user(Request request) =>
+    request.context['fh_user'] as Map<String, dynamic>? ?? {};
+
+String _role(Request request) => (_user(request)['role'] ?? '') as String;
+
+int? _uid(Request request) => _user(request)['user_id'] as int?;
+
+Middleware _authMiddleware = (innerHandler) {
+  return (request) async {
+    if (request.method == 'OPTIONS') return innerHandler(request);
+
+    final path = request.url.path;
+    if (path == 'login' || path == 'setup') {
+      return innerHandler(request);
+    }
+
+    final authHeader =
+        request.headers['Authorization'] ?? request.headers['authorization'];
+    final payload = FhJwt.getUserFromToken(authHeader);
+
+    if (payload == null) {
+      return _json(
+        {'error': 'Avtorizatsiya talab qilinadi. Iltimos, qayta kiring.'},
+        status: 401,
+      );
+    }
+
+    return innerHandler(request.change(context: {'fh_user': payload}));
+  };
+};
+
+extension _FhRoutes on Router {
+  void _registerRoutes() {
+    // ---------- AUTH ----------
+    post('/login', (Request request) async {
+      try {
+        final body = await _body(request);
+        final email = body['email'] as String?;
+        final password = body['password'] as String?;
+
+        if (email == null || password == null) {
+          return _json({'error': 'email va password majburiy'}, status: 400);
+        }
+
+        final user = await FhUserStorage.login(email, password);
+        if (user == null) {
+          return _json(
+            {'error': 'Email yoki parol noto\'g\'ri yoki hisob faol emas'},
+            status: 401,
+          );
+        }
+
+        final token = FhJwt.generateToken(
+          userId: user.id,
+          email: user.email,
+          role: user.role,
+        );
+
+        return _json({
+          'message': 'Muvaffaqiyatli kirish',
+          'token': token,
+          'user': user.toJson(),
+        });
+      } catch (e) {
+        return _json({'error': 'Xatolik: $e'}, status: 400);
+      }
+    });
+
+    post('/setup', (Request request) async {
+      try {
+        final body = await _body(request);
+        final username = body['username'] as String?;
+        final email = body['email'] as String?;
+        final password = body['password'] as String?;
+        final secretKey = body['secret_key'] as String?;
+
+        if (secretKey != FhJwt.setupSecretKey) {
+          return _json({'error': 'Maxfiy kalit noto\'g\'ri'}, status: 403);
+        }
+        if (username == null || email == null || password == null) {
+          return _json(
+            {'error': 'username, email, password majburiy'},
+            status: 400,
+          );
+        }
+
+        final user = await FhUserStorage.createFirstAdmin(username, email, password);
+        if (user == null) {
+          return _json({'error': 'Admin allaqachon mavjud'}, status: 409);
+        }
+
+        return _json({'message': 'Admin yaratildi', 'user': user.toJson()}, status: 201);
+      } catch (e) {
+        return _json({'error': 'Xatolik: $e'}, status: 400);
+      }
+    });
+
+    // ---------- USERS (assign oldin, <id> dan) ----------
+    post('/users/assign', (Request request) async {
+      if (!Policy.canManageUsers(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      if (request.method != 'POST') {
+        return _json({'error': 'Faqat POST'}, status: 405);
+      }
+      try {
+        final body = await _body(request);
+        final userId = body['user_id'] as int?;
+        final warehouseIds = (body['warehouse_ids'] as List?)
+                ?.map((e) => e as int)
+                .toList() ??
+            [];
+
+        if (userId == null) {
+          return _json({'error': 'user_id majburiy'}, status: 400);
+        }
+
+        final db = await DatabaseConnection.getConnection();
+        await db.execute('BEGIN');
+        try {
+          await db.execute(
+            'DELETE FROM fh.user_warehouses WHERE user_id = \$1',
+            parameters: [userId],
+          );
+          for (final wId in warehouseIds) {
+            await db.execute(
+              'INSERT INTO fh.user_warehouses (user_id, warehouse_id) VALUES (\$1, \$2) '
+              'ON CONFLICT DO NOTHING',
+              parameters: [userId, wId],
+            );
+          }
+          await db.execute('COMMIT');
+        } catch (_) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+
+        final wareResult = await db.execute(
+          '''SELECT w.id, w.name, w.type FROM fh.warehouses w
+             JOIN fh.user_warehouses uw ON uw.warehouse_id = w.id
+             WHERE uw.user_id = \$1''',
+          parameters: [userId],
+        );
+
+        return _json({
+          'message': 'Biriktirildi',
+          'warehouses': wareResult
+              .map((r) => {'id': r[0], 'name': r[1], 'type': r[2]})
+              .toList(),
+        });
+      } catch (e) {
+        print('assign xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    get('/users', (Request request) async {
+      if (!Policy.canManageUsers(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          '''SELECT u.id, u.username, u.email, COALESCE(u.role, 'warehouse_keeper'),
+             COALESCE(u.is_active, true), u.created_at
+             FROM fh.users u ORDER BY u.id''',
+        );
+
+        final users = <Map<String, dynamic>>[];
+        for (final row in result) {
+          final wareResult = await db.execute(
+            '''SELECT w.id, w.name, w.type FROM fh.warehouses w
+               JOIN fh.user_warehouses uw ON uw.warehouse_id = w.id
+               WHERE uw.user_id = \$1''',
+            parameters: [row[0]],
+          );
+          users.add({
+            'id': row[0],
+            'username': row[1],
+            'email': row[2],
+            'role': row[3],
+            'isActive': row[4],
+            'createdAt': row[5]?.toString(),
+            'warehouses': wareResult
+                .map((w) => {'id': w[0], 'name': w[1], 'type': w[2]})
+                .toList(),
+          });
+        }
+        return _json({'users': users, 'total': users.length});
+      } catch (e) {
+        print('users GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/users', (Request request) async {
+      if (!Policy.canManageUsers(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final username = body['username'] as String?;
+        final email = body['email'] as String?;
+        final password = body['password'] as String?;
+        final role = body['role'] as String? ?? AppRoles.warehouseKeeper;
+
+        if (username == null || email == null || password == null) {
+          return _json(
+            {'error': 'username, email, password majburiy'},
+            status: 400,
+          );
+        }
+        if (!AppRoles.isValid(role)) {
+          return _json({'error': "Rol noto'g'ri"}, status: 400);
+        }
+
+        final user = await FhUserStorage.createUser(
+          username: username,
+          email: email,
+          password: password,
+          role: role,
+        );
+        if (user == null) {
+          return _json({'error': 'Email band yoki rol xato'}, status: 409);
+        }
+        return _json(
+          {'message': 'Foydalanuvchi yaratildi', 'user': user.toJson()},
+          status: 201,
+        );
+      } catch (_) {
+        return _json({'error': 'Xatolik'}, status: 400);
+      }
+    });
+
+    get('/users/<id|#>', (Request request, String id) async {
+      final userId = int.tryParse(id);
+      if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+
+      final callerRole = _role(request);
+      final callerId = _uid(request);
+      final isSelf = callerId == userId;
+      if (!isSelf && !Policy.canManageUsers(callerRole)) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final userResult = await db.execute(
+          'SELECT id, username, email, role, COALESCE(is_active, true) '
+          'FROM fh.users WHERE id = \$1',
+          parameters: [userId],
+        );
+        if (userResult.isEmpty) {
+          return _json({'error': 'Topilmadi'}, status: 404);
+        }
+        final u = userResult.first;
+
+        final wareResult = await db.execute(
+          '''SELECT w.id, w.name, w.type FROM fh.warehouses w
+             JOIN fh.user_warehouses uw ON uw.warehouse_id = w.id
+             WHERE uw.user_id = \$1''',
+          parameters: [userId],
+        );
+
+        return _json({
+          'user': {
+            'id': u[0], 'username': u[1], 'email': u[2],
+            'role': u[3], 'isActive': u[4],
+          },
+          'warehouses': wareResult
+              .map((r) => {'id': r[0], 'name': r[1], 'type': r[2]})
+              .toList(),
+        });
+      } catch (e) {
+        print('users/:id GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    put('/users/<id|#>', (Request request, String id) async {
+      final userId = int.tryParse(id);
+      if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+
+      final callerRole = _role(request);
+      final callerId = _uid(request);
+      final isSelf = callerId == userId;
+      if (!isSelf && !Policy.canManageUsers(callerRole)) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+
+      try {
+        final body = await _body(request);
+        final canManage = Policy.canManageUsers(callerRole);
+        final user = await FhUserStorage.update(
+          userId,
+          username: body['username'] as String?,
+          email: canManage ? body['email'] as String? : null,
+          password: body['password'] as String?,
+          role: canManage ? body['role'] as String? : null,
+          isActive: canManage ? body['is_active'] as bool? : null,
+        );
+        if (user == null) {
+          return _json(
+            {'error': "Yangilanmadi (rol xato bo'lishi mumkin)"},
+            status: 400,
+          );
+        }
+        return _json({'message': 'Yangilandi', 'user': user.toJson()});
+      } catch (_) {
+        return _json({'error': 'Xatolik'}, status: 400);
+      }
+    });
+
+    delete('/users/<id|#>', (Request request, String id) async {
+      final userId = int.tryParse(id);
+      if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+
+      final callerRole = _role(request);
+      final callerId = _uid(request);
+      if (!Policy.canManageUsers(callerRole)) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      if (callerId == userId) {
+        return _json({'error': "O'zingizni o'chira olmaysiz"}, status: 400);
+      }
+      final user = await FhUserStorage.update(userId, isActive: false);
+      if (user == null) return _json({'error': 'Topilmadi'}, status: 404);
+      return _json({'message': 'Deaktivatsiya qilindi'});
+    });
+
+    // ---------- FACTORY SETTINGS ----------
+    get('/factory/settings', (Request request) async {
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          'SELECT name, address, updated_at FROM fh.factory_settings WHERE id = 1',
+        );
+        if (result.isEmpty) {
+          return _json({'error': 'Sozlamalar topilmadi'}, status: 404);
+        }
+        final row = result.first;
+        return _json({
+          'factory': {
+            'id': 1,
+            'name': row[0],
+            'address': row[1],
+            'updatedAt': row[2]?.toString(),
+          },
+        });
+      } catch (e) {
+        print('factory GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    put('/factory/settings', (Request request) async {
+      if (!Policy.canManageSettings(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final name = body['name'] as String?;
+        final address = body['address'] as String?;
+
+        if (name == null || name.trim().isEmpty) {
+          return _json({'error': 'name majburiy'}, status: 400);
+        }
+
+        final db = await DatabaseConnection.getConnection();
+        await db.execute(
+          'UPDATE fh.factory_settings SET name = \$1, '
+          'address = COALESCE(\$2, address), updated_at = now() WHERE id = 1',
+          parameters: [name.trim(), address],
+        );
+        return _json({'message': 'Saqlandi'});
+      } catch (_) {
+        return _json({'error': 'Xatolik'}, status: 400);
+      }
+    });
+
+    // ---------- CATALOG ----------
+    get('/catalog/raw-materials', (Request request) async {
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute('''
+          SELECT rm.id, rm.name, rm.code, rm.unit,
+            COALESCE((
+              SELECT SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END)
+              FROM fh.stock_ledger l
+              WHERE l.item_type = 'raw_material' AND l.ref_id = rm.id
+            ), 0) AS stock
+          FROM public.raw_materials rm
+          ORDER BY rm.name
+        ''');
+
+        return _json({
+          'rawMaterials': result.map((row) => {
+            'id': row[0], 'name': row[1], 'code': row[2],
+            'unit': row[3], 'stock': row[4]?.toString(),
+          }).toList(),
+          'total': result.length,
+        });
+      } catch (e) {
+        print('raw-materials xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    get('/catalog/products', (Request request) async {
+      try {
+        final search = request.url.queryParameters['search']?.trim();
+
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          '''
+          SELECT p.barcode, p.name, p.category, p.pcs_in_box, p.price_usd,
+                 p.netto_per_piece,
+                 COALESCE((
+                   SELECT SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END)
+                   FROM fh.stock_ledger l
+                   WHERE l.item_type = 'product' AND l.ref_barcode = p.barcode
+                 ), 0) AS stock
+          FROM public.products p
+          WHERE (\$1::varchar IS NULL OR p.name ILIKE '%' || \$1 || '%' OR p.barcode LIKE '%' || \$1 || '%')
+          ORDER BY p.name
+          ''',
+          parameters: [(search == null || search.isEmpty) ? null : search],
+        );
+
+        return _json({
+          'products': result.map((row) => {
+            'barcode': row[0], 'name': row[1], 'category': row[2],
+            'pcsInBox': row[3], 'priceUsd': row[4]?.toString(),
+            'nettoPerPiece': row[5]?.toString(), 'stock': row[6]?.toString(),
+          }).toList(),
+          'total': result.length,
+        });
+      } catch (e) {
+        print('products xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    get('/catalog/partners', (Request request) async {
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute('''
+          SELECT id, firma_nomi, firma_turi, shartnoma_raqami, davlati, faolligi
+          FROM public.partners
+          ORDER BY faolligi DESC, firma_nomi
+        ''');
+
+        return _json({
+          'partners': result.map((row) => {
+            'id': row[0], 'name': row[1], 'type': row[2],
+            'contractNumber': row[3], 'country': row[4], 'isActive': row[5],
+          }).toList(),
+          'total': result.length,
+        });
+      } catch (e) {
+        print('partners xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- WAREHOUSES ----------
+    get('/warehouses', (Request request) async {
+      final role = _role(request);
+      final userId = _uid(request);
+
+      try {
+        final db = await DatabaseConnection.getConnection();
+
+        var result;
+        if (role == AppRoles.warehouseKeeper && userId != null) {
+          result = await db.execute(
+            '''SELECT w.id, w.name, w.type, w.is_active, w.created_at
+               FROM fh.warehouses w
+               JOIN fh.user_warehouses uw ON uw.warehouse_id = w.id
+               WHERE uw.user_id = \$1
+               ORDER BY w.id''',
+            parameters: [userId],
+          );
+        } else {
+          result = await db.execute(
+            'SELECT id, name, type, is_active, created_at FROM fh.warehouses ORDER BY id',
+          );
+        }
+
+        final warehouses = <Map<String, dynamic>>[];
+        for (final row in result) {
+          final countResult = await db.execute(
+            "SELECT COUNT(DISTINCT COALESCE(ref_id::text, ref_barcode)) "
+            'FROM fh.stock_ledger WHERE warehouse_id = \$1 AND direction IS NOT NULL',
+            parameters: [row[0]],
+          );
+          warehouses.add({
+            'id': row[0],
+            'name': row[1],
+            'type': row[2],
+            'isActive': row[3],
+            'createdAt': row[4]?.toString(),
+            'itemCount': countResult.isNotEmpty ? countResult.first[0] : 0,
+          });
+        }
+
+        return _json({'warehouses': warehouses, 'total': warehouses.length});
+      } catch (e) {
+        print('warehouses GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/warehouses', (Request request) async {
+      if (!Policy.canControlWarehouses(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final name = body['name'] as String?;
+        final type = body['type'] as String?;
+        final allowedTypes = [
+          'raw', 'finished', 'spare_parts', 'semi_finished', 'sales', 'dealer'
+        ];
+
+        if (name == null || name.trim().isEmpty || type == null) {
+          return _json({'error': 'name va type majburiy'}, status: 400);
+        }
+        if (!allowedTypes.contains(type)) {
+          return _json({'error': "type noto'g'ri"}, status: 400);
+        }
+
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          'INSERT INTO fh.warehouses (name, type) VALUES (\$1, \$2) '
+          'RETURNING id, name, type, is_active, created_at',
+          parameters: [name.trim(), type],
+        );
+        final row = result.first;
+        return _json({
+          'message': 'Ombor yaratildi',
+          'warehouse': {
+            'id': row[0], 'name': row[1], 'type': row[2], 'isActive': row[3]
+          },
+        }, status: 201);
+      } catch (e) {
+        print('warehouses POST xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    get('/warehouses/<id|#>', (Request request, String id) async {
+      final warehouseId = int.tryParse(id);
+      if (warehouseId == null) {
+        return _json({'error': "Noto'g'ri ID"}, status: 400);
+      }
+
+      final role = _role(request);
+      final userId = _uid(request);
+
+      try {
+        final db = await DatabaseConnection.getConnection();
+
+        if (role == AppRoles.warehouseKeeper && userId != null) {
+          final allowed = await db.execute(
+            'SELECT 1 FROM fh.user_warehouses WHERE user_id = \$1 AND warehouse_id = \$2',
+            parameters: [userId, warehouseId],
+          );
+          if (allowed.isEmpty) {
+            return _json(
+              {'error': 'Bu ombor sizga biriktirilmagan'},
+              status: 403,
+            );
+          }
+        }
+
+        final infoResult = await db.execute(
+          'SELECT name, type, is_active, created_at FROM fh.warehouses WHERE id = \$1',
+          parameters: [warehouseId],
+        );
+        if (infoResult.isEmpty) {
+          return _json({'error': 'Topilmadi'}, status: 404);
+        }
+        final info = infoResult.first;
+
+        final stockResult = await db.execute(
+          '''
+          SELECT item_type,
+                 COALESCE(ref_id::text, ref_barcode) AS ref_key,
+                 MAX(name_snapshot) AS name,
+                 MAX(unit) AS unit,
+                 SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END) AS balance
+          FROM fh.stock_ledger
+          WHERE warehouse_id = \$1
+          GROUP BY item_type, COALESCE(ref_id::text, ref_barcode)
+          HAVING SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END) <> 0
+          ORDER BY item_type, name
+          ''',
+          parameters: [warehouseId],
+        );
+
+        return _json({
+          'warehouse': {
+            'id': warehouseId,
+            'name': info[0],
+            'type': info[1],
+            'isActive': info[2],
+            'createdAt': info[3]?.toString(),
+          },
+          'stock': stockResult.map((row) => {
+            'itemType': row[0], 'refKey': row[1], 'name': row[2],
+            'unit': row[3], 'balance': row[4]?.toString(),
+          }).toList(),
+        });
+      } catch (e) {
+        print('warehouse/:id xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- STOCK TRANSACTION ----------
+    post('/warehouse/transaction', (Request request) async {
+      final role = _role(request);
+      final userId = _uid(request);
+
+      if (!Policy.canTransactStock(role)) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+
+      try {
+        final body = await _body(request);
+        final warehouseId = body['warehouse_id'] as int?;
+        final itemType = body['item_type'] as String?;
+        final refId = body['ref_id'] as int?;
+        final refBarcode = body['ref_barcode'] as String?;
+        final direction = body['direction'] as String?;
+        final qty = (body['qty'] as num?)?.toDouble();
+        final note = body['note'] as String?;
+
+        final allowedTypes = ['raw_material', 'product', 'spare_part', 'semi_finished'];
+        if (warehouseId == null || itemType == null || direction == null || qty == null) {
+          return _json(
+            {'error': 'warehouse_id, item_type, direction, qty majburiy'},
+            status: 400,
+          );
+        }
+        if (!allowedTypes.contains(itemType) || !['in', 'out'].contains(direction)) {
+          return _json(
+            {'error': "item_type yoki direction noto'g'ri"},
+            status: 400,
+          );
+        }
+        if (qty <= 0) {
+          return _json({'error': 'qty > 0 bo\'lishi kerak'}, status: 400);
+        }
+        if (itemType == 'raw_material' && refId == null) {
+          return _json(
+            {'error': 'raw_material uchun ref_id majburiy'},
+            status: 400,
+          );
+        }
+        if (itemType == 'product' && (refBarcode == null || refBarcode.isEmpty)) {
+          return _json(
+            {'error': 'product uchun ref_barcode majburiy'},
+            status: 400,
+          );
+        }
+
+        final db = await DatabaseConnection.getConnection();
+
+        final wh = await db.execute(
+          'SELECT id FROM fh.warehouses WHERE id = \$1 AND is_active',
+          parameters: [warehouseId],
+        );
+        if (wh.isEmpty) {
+          return _json({'error': 'Ombor topilmadi'}, status: 404);
+        }
+
+        if (role == AppRoles.warehouseKeeper && userId != null) {
+          final allowed = await db.execute(
+            'SELECT 1 FROM fh.user_warehouses WHERE user_id = \$1 AND warehouse_id = \$2',
+            parameters: [userId, warehouseId],
+          );
+          if (allowed.isEmpty) {
+            return _json(
+              {'error': 'Bu ombor sizga biriktirilmagan'},
+              status: 403,
+            );
+          }
+        }
+
+        String nameSnapshot;
+        String unit;
+        if (itemType == 'raw_material') {
+          final r = await db.execute(
+            'SELECT name, unit FROM public.raw_materials WHERE id = \$1',
+            parameters: [refId],
+          );
+          if (r.isEmpty) {
+            return _json({'error': 'Xom ashyo topilmadi'}, status: 404);
+          }
+          nameSnapshot = r.first[0] as String;
+          unit = r.first[1] as String? ?? 'kg';
+        } else if (itemType == 'product') {
+          final r = await db.execute(
+            'SELECT name FROM public.products WHERE barcode = \$1',
+            parameters: [refBarcode],
+          );
+          if (r.isEmpty) {
+            return _json({'error': 'Mahsulot topilmadi'}, status: 404);
+          }
+          nameSnapshot = r.first[0] as String;
+          unit = 'dona';
+        } else {
+          nameSnapshot = (body['name'] as String?) ?? 'Noma\'lum element';
+          unit = (body['unit'] as String?) ?? 'dona';
+        }
+
+        if (direction == 'out') {
+          final balResult = await db.execute(
+            '''
+            SELECT COALESCE(SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END), 0)
+            FROM fh.stock_ledger
+            WHERE warehouse_id = \$1 AND item_type = \$2
+              AND COALESCE(ref_id::text, ref_barcode) = COALESCE(\$3::int::text, \$4)
+            ''',
+            parameters: [warehouseId, itemType, refId, refBarcode],
+          );
+          final balance = double.parse(balResult.first[0].toString());
+          if (balance < qty) {
+            return _json({
+              'error': "Qoldiq yetarli emas. Mavjud: $balance $unit",
+            }, status: 409);
+          }
+        }
+
+        await db.execute(
+          '''
+          INSERT INTO fh.stock_ledger
+            (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+             direction, qty, source_type, performed_by, note)
+          VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, 'manual', \$9, \$10)
+          ''',
+          parameters: [
+            warehouseId, itemType, refId, refBarcode, nameSnapshot, unit,
+            direction, qty, userId, note,
+          ],
+        );
+
+        return _json({'message': 'Hujjat yozildi'}, status: 201);
+      } catch (e) {
+        print('transaction xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- STOCK REPORT ----------
+    get('/stock', (Request request) async {
+      try {
+        final warehouseId =
+            int.tryParse(request.url.queryParameters['warehouse_id'] ?? '');
+
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          '''
+          SELECT w.id AS warehouse_id, w.name AS warehouse_name, w.type,
+                 l.item_type,
+                 COALESCE(l.ref_id::text, l.ref_barcode) AS ref_key,
+                 MAX(l.name_snapshot) AS name,
+                 MAX(l.unit) AS unit,
+                 SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) AS balance
+          FROM fh.stock_ledger l
+          JOIN fh.warehouses w ON w.id = l.warehouse_id
+          WHERE (\$1::int IS NULL OR w.id = \$1)
+          GROUP BY w.id, w.name, w.type, l.item_type, COALESCE(l.ref_id::text, l.ref_barcode)
+          HAVING SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) > 0
+          ORDER BY w.name, l.item_type
+          ''',
+          parameters: [warehouseId],
+        );
+
+        return _json({
+          'stock': result.map((row) => {
+            'warehouseId': row[0], 'warehouseName': row[1], 'type': row[2],
+            'itemType': row[3], 'refKey': row[4], 'name': row[5],
+            'unit': row[6], 'balance': row[7]?.toString(),
+          }).toList(),
+          'total': result.length,
+        });
+      } catch (e) {
+        print('stock xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- PLANS ----------
+    get('/plans', (Request request) async {
+      try {
+        final status = request.url.queryParameters['status'];
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          '''
+          SELECT p.id, p.title, p.description, p.product_barcode, pr.name AS product_name,
+                 p.order_id, p.target_qty, p.produced_qty, p.due_date, p.status,
+                 u.username AS created_by_name, p.created_at
+          FROM fh.plans p
+          LEFT JOIN public.products pr ON pr.barcode = p.product_barcode
+          LEFT JOIN fh.users u ON u.id = p.created_by
+          WHERE (\$1::varchar IS NULL OR p.status = \$1)
+          ORDER BY
+            CASE p.status WHEN 'in_progress' THEN 0 WHEN 'planned' THEN 1 ELSE 2 END,
+            p.created_at DESC
+          LIMIT 200
+          ''',
+          parameters: [status],
+        );
+
+        return _json({
+          'plans': result.map((row) => {
+            'id': row[0], 'title': row[1], 'description': row[2],
+            'barcode': row[3], 'productName': row[4], 'orderId': row[5],
+            'targetQty': row[6], 'producedQty': row[7],
+            'dueDate': row[8]?.toString(), 'status': row[9],
+            'createdBy': row[10], 'createdAt': row[11]?.toString(),
+          }).toList(),
+        });
+      } catch (e) {
+        print('plans GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/plans', (Request request) async {
+      if (!Policy.canPlan(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final title = body['title'] as String?;
+        final description = body['description'] as String?;
+        final barcode = body['barcode'] as String?;
+        final targetQty = (body['target_qty'] as num?)?.toInt();
+        final orderId = body['order_id'] as int?;
+        final dueDate = body['due_date'] as String?;
+
+        if (title == null ||
+            title.trim().isEmpty ||
+            targetQty == null ||
+            targetQty <= 0) {
+          return _json(
+            {'error': 'title va target_qty (>0) majburiy'},
+            status: 400,
+          );
+        }
+
+        final db = await DatabaseConnection.getConnection();
+        await db.execute(
+          '''
+          INSERT INTO fh.plans
+            (title, description, product_barcode, order_id, target_qty, due_date, created_by)
+          VALUES (\$1, \$2, \$3, \$4, \$5, \$6::date, \$7)
+          ''',
+          parameters: [
+            title.trim(), description, barcode, orderId, targetQty, dueDate, _uid(request),
+          ],
+        );
+
+        return _json({'message': 'Reja yaratildi'}, status: 201);
+      } catch (_) {
+        return _json({'error': 'Xatolik'}, status: 400);
+      }
+    });
+
+    put('/plans/<id|#>', (Request request, String id) async {
+      final planId = int.tryParse(id);
+      if (planId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+
+      if (!Policy.canPlan(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+
+      try {
+        final body = await _body(request);
+        final status = body['status'] as String?;
+        final allowed = ['planned', 'in_progress', 'done', 'cancelled'];
+
+        if (status == null || !allowed.contains(status)) {
+          return _json({'error': 'status: $allowed'}, status: 400);
+        }
+
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          'UPDATE fh.plans SET status = \$2 WHERE id = \$1 RETURNING id',
+          parameters: [planId, status],
+        );
+        if (result.isEmpty) {
+          return _json({'error': 'Reja topilmadi'}, status: 404);
+        }
+
+        return _json({'message': 'Yangilandi'});
+      } catch (e) {
+        print('plans/:id xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- SUPPLIER ORDERS ----------
+    get('/supplier-orders', (Request request) async {
+      try {
+        final status = request.url.queryParameters['status'];
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          '''
+          SELECT s.id, s.supplier_name, s.raw_material_id, rm.name AS material_name,
+                 s.qty, s.unit, s.ordered_at, s.expected_at, s.received_at,
+                 s.status,
+                 CASE
+                   WHEN s.status IN ('ordered','in_transit') AND s.expected_at < CURRENT_DATE
+                     THEN true ELSE false
+                 END AS is_late
+          FROM fh.supplier_orders s
+          LEFT JOIN public.raw_materials rm ON rm.id = s.raw_material_id
+          WHERE (\$1::varchar IS NULL OR s.status = \$1)
+          ORDER BY s.status, s.expected_at NULLS LAST, s.id DESC
+          LIMIT 200
+          ''',
+          parameters: [status],
+        );
+
+        return _json({
+          'orders': result.map((row) => {
+            'id': row[0], 'supplierName': row[1], 'rawMaterialId': row[2],
+            'materialName': row[3], 'qty': row[4]?.toString(), 'unit': row[5],
+            'orderedAt': row[6]?.toString(), 'expectedAt': row[7]?.toString(),
+            'receivedAt': row[8]?.toString(), 'status': row[9], 'isLate': row[10],
+          }).toList(),
+        });
+      } catch (e) {
+        print('supplier-orders GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/supplier-orders', (Request request) async {
+      if (!Policy.canControlWarehouses(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final supplierName = body['supplier_name'] as String?;
+        final rawMaterialId = body['raw_material_id'] as int?;
+        final qty = (body['qty'] as num?)?.toDouble();
+        final unit = body['unit'] as String? ?? 'kg';
+        final expectedAt = body['expected_at'] as String?;
+
+        if (supplierName == null || rawMaterialId == null || qty == null || qty <= 0) {
+          return _json({
+            'error': 'supplier_name, raw_material_id va qty (>0) majburiy',
+          }, status: 400);
+        }
+
+        final db = await DatabaseConnection.getConnection();
+        await db.execute(
+          '''
+          INSERT INTO fh.supplier_orders
+            (supplier_name, raw_material_id, qty, unit, expected_at, created_by)
+          VALUES (\$1, \$2, \$3, \$4, \$5::date, \$6)
+          ''',
+          parameters: [supplierName, rawMaterialId, qty, unit, expectedAt, _uid(request)],
+        );
+
+        return _json({'message': "Buyurtma qo'shildi"}, status: 201);
+      } catch (_) {
+        return _json({'error': 'Xatolik'}, status: 400);
+      }
+    });
+
+    put('/supplier-orders/<id|#>', (Request request, String id) async {
+      final orderId = int.tryParse(id);
+      if (orderId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+
+      if (!Policy.canControlWarehouses(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+
+      try {
+        final body = await _body(request);
+        final status = body['status'] as String?;
+        final allowed = ['ordered', 'in_transit', 'received', 'cancelled'];
+
+        if (status == null || !allowed.contains(status)) {
+          return _json({'error': 'status: $allowed'}, status: 400);
+        }
+
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          '''
+          UPDATE fh.supplier_orders
+          SET status = \$2,
+              received_at = CASE WHEN \$2 = 'received' THEN CURRENT_DATE ELSE received_at END
+          WHERE id = \$1
+          RETURNING id
+          ''',
+          parameters: [orderId, status],
+        );
+        if (result.isEmpty) {
+          return _json({'error': 'Topilmadi'}, status: 404);
+        }
+
+        return _json({'message': 'Yangilandi'});
+      } catch (e) {
+        print('supplier-orders/:id xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- PRODUCTION (norms/start oldin, umumiy <id> keyin) ----------
+    get('/production/norms/<barcode>', (Request request, String barcode) async {
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          '''
+          SELECT rm.id, rm.name, rm.code, pm.grams_per_unit,
+            COALESCE((
+              SELECT SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END)
+              FROM fh.stock_ledger l
+              WHERE l.item_type = 'raw_material' AND l.ref_id = rm.id
+            ), 0) AS total_stock
+          FROM public.product_materials pm
+          JOIN public.raw_materials rm ON rm.id = pm.raw_material_id
+          WHERE pm.product_barcode = \$1 AND pm.is_active
+          ''',
+          parameters: [barcode],
+        );
+
+        return _json({
+          'norms': result.map((row) => {
+            'rawMaterialId': row[0], 'name': row[1], 'code': row[2],
+            'gramsPerUnit': row[3]?.toString(), 'totalStock': row[4]?.toString(),
+          }).toList(),
+        });
+      } catch (e) {
+        print('norms xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/production/start', (Request request) async {
+      if (!Policy.canPlan(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+
+      try {
+        final body = await _body(request);
+        final barcode = body['barcode'] as String?;
+        final qty = (body['qty'] as num?)?.toInt();
+        final rawWarehouseId = body['raw_warehouse_id'] as int?;
+        final finishedWarehouseId = body['finished_warehouse_id'] as int?;
+        final planId = body['plan_id'] as int?;
+        final orderId = body['order_id'] as int?;
+
+        if (barcode == null ||
+            qty == null ||
+            qty <= 0 ||
+            rawWarehouseId == null ||
+            finishedWarehouseId == null) {
+          return _json({
+            'error': 'barcode, qty, raw_warehouse_id, finished_warehouse_id majburiy',
+          }, status: 400);
+        }
+
+        final db = await DatabaseConnection.getConnection();
+
+        final product = await db.execute(
+          'SELECT name FROM public.products WHERE barcode = \$1',
+          parameters: [barcode],
+        );
+        if (product.isEmpty) {
+          return _json({'error': 'Mahsulot topilmadi'}, status: 404);
+        }
+        final productName = product.first[0] as String;
+
+        final norms = await db.execute(
+          '''
+          SELECT rm.id, rm.name, rm.unit, pm.grams_per_unit
+          FROM public.product_materials pm
+          JOIN public.raw_materials rm ON rm.id = pm.raw_material_id
+          WHERE pm.product_barcode = \$1 AND pm.is_active
+          ''',
+          parameters: [barcode],
+        );
+        if (norms.isEmpty) {
+          return _json({
+            'error': "Bu mahsulot uchun norma topilmadi ($barcode)",
+          }, status: 409);
+        }
+
+        await db.execute('BEGIN');
+        try {
+          for (final norm in norms) {
+            final rawId = norm[0] as int;
+            final grams = double.parse(norm[3].toString());
+            final needKg = grams * qty / 1000.0;
+
+            final balResult = await db.execute(
+              '''
+              SELECT COALESCE(SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END), 0)
+              FROM fh.stock_ledger
+              WHERE warehouse_id = \$1 AND item_type = 'raw_material' AND ref_id = \$2
+              FOR UPDATE
+              ''',
+              parameters: [rawWarehouseId, rawId],
+            );
+            final balance = double.parse(balResult.first[0].toString());
+
+            if (balance < needKg) {
+              await db.execute('ROLLBACK');
+              return _json({
+                'error':
+                    "Xom ashyo yetarli emas: ${norm[1]} â€” kerak ${needKg.toStringAsFixed(3)} ${norm[2]}, mavjud $balance",
+              }, status: 409);
+            }
+
+            await db.execute(
+              '''
+              INSERT INTO fh.stock_ledger
+                (warehouse_id, item_type, ref_id, name_snapshot, unit,
+                 direction, qty, source_type, source_ref, performed_by)
+              VALUES (\$1, 'raw_material', \$2, \$3, \$4, 'out', \$5, 'production_out', \$6, \$7)
+              ''',
+              parameters: [
+                rawWarehouseId, rawId, norm[1], norm[2],
+                needKg, barcode, _uid(request),
+              ],
+            );
+          }
+
+          final batchResult = await db.execute(
+            '''
+            INSERT INTO fh.production_batches
+              (product_barcode, plan_id, order_id, planned_qty, started_by)
+            VALUES (\$1, \$2, \$3, \$4, \$5)
+            RETURNING id
+            ''',
+            parameters: [barcode, planId, orderId, qty, _uid(request)],
+          );
+          final batchId = batchResult.first[0];
+
+          if (planId != null) {
+            await db.execute(
+              "UPDATE fh.plans SET status = 'in_progress' WHERE id = \$1 AND status = 'planned'",
+              parameters: [planId],
+            );
+          }
+
+          await db.execute('COMMIT');
+
+          return _json({
+            'message': 'Ishlab chiqarish boshlandi',
+            'batchId': batchId,
+            'product': productName,
+            'plannedQty': qty,
+            'rawConsumed': norms.length,
+          }, status: 201);
+        } catch (_) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('production/start xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    put('/production/<id|#>', (Request request, String id) async {
+      final batchId = int.tryParse(id);
+      if (batchId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+
+      if (!Policy.canPlan(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+
+      try {
+        final body = await _body(request);
+        final action = body['action'] as String?;
+        final finishedWarehouseId = body['finished_warehouse_id'] as int?;
+        final producedQty = (body['produced_qty'] as num?)?.toInt();
+
+        if (action == null || !['complete', 'cancel'].contains(action)) {
+          return _json({'error': 'action: complete|cancel'}, status: 400);
+        }
+        if (action == 'complete' &&
+            (finishedWarehouseId == null ||
+                producedQty == null ||
+                producedQty <= 0)) {
+          return _json({
+            'error': 'complete uchun finished_warehouse_id va produced_qty majburiy',
+          }, status: 400);
+        }
+
+        final db = await DatabaseConnection.getConnection();
+
+        final batchResult = await db.execute(
+          'SELECT product_barcode, status FROM fh.production_batches WHERE id = \$1',
+          parameters: [batchId],
+        );
+        if (batchResult.isEmpty) {
+          return _json({'error': 'Partiya topilmadi'}, status: 404);
+        }
+        final batch = batchResult.first;
+        if (batch[1] != 'in_progress') {
+          return _json(
+            {'error': 'Partiya allaqachon yakunlangan'},
+            status: 409,
+          );
+        }
+
+        final barcode = batch[0] as String;
+
+        await db.execute('BEGIN');
+        try {
+          if (action == 'complete') {
+            final product = await db.execute(
+              'SELECT name FROM public.products WHERE barcode = \$1',
+              parameters: [barcode],
+            );
+            final productName =
+                product.isNotEmpty ? product.first[0] as String : barcode;
+
+            await db.execute(
+              '''
+              INSERT INTO fh.stock_ledger
+                (warehouse_id, item_type, ref_barcode, name_snapshot, unit,
+                 direction, qty, source_type, source_ref, performed_by)
+              VALUES (\$1, 'product', \$2, \$3, 'dona', 'in', \$4, 'production_in', \$5, \$6)
+              ''',
+              parameters: [
+                finishedWarehouseId, barcode, productName,
+                producedQty!.toDouble(), batchId.toString(), _uid(request),
+              ],
+            );
+
+            await db.execute(
+              '''
+              UPDATE fh.production_batches
+              SET status = 'completed', produced_qty = \$2, completed_at = now()
+              WHERE id = \$1
+              ''',
+              parameters: [batchId, producedQty],
+            );
+
+            await db.execute(
+              '''
+              UPDATE fh.plans p SET produced_qty = p.produced_qty + \$2,
+                     status = CASE WHEN p.produced_qty + \$2 >= p.target_qty THEN 'done' ELSE 'in_progress' END
+              WHERE p.id = (SELECT plan_id FROM fh.production_batches WHERE id = \$1 AND plan_id IS NOT NULL)
+              ''',
+              parameters: [batchId, producedQty],
+            );
+          } else {
+            await db.execute(
+              "UPDATE fh.production_batches SET status = 'cancelled', completed_at = now() "
+              'WHERE id = \$1',
+              parameters: [batchId],
+            );
+          }
+
+          await db.execute('COMMIT');
+          return _json({
+            'message': action == 'complete' ? 'Yakunlandi' : 'Bekor qilindi'
+          });
+        } catch (_) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('production/:id xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- REPORTS ----------
+    get('/reports/production', (Request request) async {
+      try {
+        final status = request.url.queryParameters['status'];
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          '''
+          SELECT b.id, b.product_barcode, p.name AS product_name,
+                 b.planned_qty, b.produced_qty, b.status,
+                 u.username AS started_by, b.created_at, b.completed_at
+          FROM fh.production_batches b
+          LEFT JOIN public.products p ON p.barcode = b.product_barcode
+          LEFT JOIN fh.users u ON u.id = b.started_by
+          WHERE (\$1::varchar IS NULL OR b.status = \$1)
+          ORDER BY b.created_at DESC
+          LIMIT 200
+          ''',
+          parameters: [status],
+        );
+
+        return _json({
+          'batches': result.map((row) => {
+            'id': row[0], 'barcode': row[1], 'productName': row[2],
+            'plannedQty': row[3], 'producedQty': row[4], 'status': row[5],
+            'startedBy': row[6], 'createdAt': row[7]?.toString(),
+            'completedAt': row[8]?.toString(),
+          }).toList(),
+          'total': result.length,
+        });
+      } catch (e) {
+        print('reports/production xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- DASHBOARD & ALERTS ----------
+    get('/dashboard/summary', (Request request) async {
+      final role = _role(request);
+
+      try {
+        final db = await DatabaseConnection.getConnection();
+
+        final counts = await db.execute('''
+          SELECT
+            (SELECT COUNT(*) FROM fh.users WHERE is_active),
+            (SELECT COUNT(*) FROM fh.warehouses WHERE is_active),
+            (SELECT COUNT(*) FROM fh.plans WHERE status IN ('planned','in_progress')),
+            (SELECT COUNT(*) FROM fh.production_batches WHERE status = 'in_progress'),
+            (SELECT COUNT(*) FROM fh.supplier_orders WHERE status IN ('ordered','in_transit')),
+            (SELECT COUNT(*) FROM public.partners WHERE faolligi),
+            (SELECT COUNT(*) FROM public.products),
+            (SELECT COUNT(*) FROM public.raw_materials)
+        ''');
+        final c = counts.first;
+
+        final lowStock = await db.execute('''
+          SELECT t.item_type,
+                 COALESCE(t.ref_id::text, t.ref_barcode) AS ref_key,
+                 MAX(COALESCE(l.name_snapshot, '?')) AS name,
+                 t.min_qty,
+                 SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) AS balance
+          FROM fh.stock_thresholds t
+          LEFT JOIN fh.stock_ledger l
+            ON l.item_type = t.item_type
+           AND ((t.ref_id IS NOT NULL AND l.ref_id = t.ref_id)
+             OR (t.ref_barcode IS NOT NULL AND l.ref_barcode = t.ref_barcode))
+          GROUP BY t.item_type, COALESCE(t.ref_id::text, t.ref_barcode), t.min_qty
+          HAVING SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) < t.min_qty
+        ''');
+
+        late var lateOrders;
+        if (Policy.canControlWarehouses(role) || Policy.canManageSettings(role)) {
+          lateOrders = await db.execute(
+            "SELECT COUNT(*) FROM fh.supplier_orders "
+            "WHERE status IN ('ordered','in_transit') AND expected_at < CURRENT_DATE",
+          );
+        } else {
+          lateOrders = [[0]];
+        }
+
+        return _json({
+          'stats': {
+            'activeUsers': c[0],
+            'activeWarehouses': c[1],
+            'openPlans': c[2],
+            'batchesInProgress': c[3],
+            'pendingSupplierOrders': c[4],
+            'activePartners': c[5],
+            'totalProducts': c[6],
+            'totalRawMaterials': c[7],
+          },
+          'lowStockCount': lowStock.length,
+          'lowStock': lowStock.map((row) => {
+            'itemType': row[0], 'refKey': row[1], 'name': row[2],
+            'minQty': row[3]?.toString(), 'balance': row[4]?.toString(),
+          }).toList(),
+          'lateSupplierOrders': lateOrders.first[0],
+        });
+      } catch (e) {
+        print('dashboard xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    get('/alerts', (Request request) async {
+      try {
+        final db = await DatabaseConnection.getConnection();
+
+        final lowStock = await db.execute('''
+          SELECT t.item_type,
+                 COALESCE(t.ref_id::text, t.ref_barcode) AS ref_key,
+                 MAX(COALESCE(l.name_snapshot, '?')) AS name,
+                 t.min_qty,
+                 SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) AS balance
+          FROM fh.stock_thresholds t
+          LEFT JOIN fh.stock_ledger l
+            ON l.item_type = t.item_type
+           AND ((t.ref_id IS NOT NULL AND l.ref_id = t.ref_id)
+             OR (t.ref_barcode IS NOT NULL AND l.ref_barcode = t.ref_barcode))
+          GROUP BY t.item_type, COALESCE(t.ref_id::text, t.ref_barcode), t.min_qty
+          HAVING SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) < t.min_qty
+          ORDER BY name
+        ''');
+
+        final lateOrders = await db.execute('''
+          SELECT s.id, s.supplier_name, rm.name AS material_name, s.expected_at,
+                 CURRENT_DATE - s.expected_at AS days_late
+          FROM fh.supplier_orders s
+          LEFT JOIN public.raw_materials rm ON rm.id = s.raw_material_id
+          WHERE s.status IN ('ordered','in_transit') AND s.expected_at < CURRENT_DATE
+          ORDER BY days_late DESC
+        ''');
+
+        final overduePlans = await db.execute('''
+          SELECT id, title, due_date, target_qty - produced_qty AS remaining
+          FROM fh.plans
+          WHERE status IN ('planned','in_progress') AND due_date < CURRENT_DATE
+          ORDER BY due_date
+        ''');
+
+        return _json({
+          'lowStock': lowStock.map((row) => {
+            'itemType': row[0], 'refKey': row[1], 'name': row[2],
+            'minQty': row[3]?.toString(), 'balance': row[4]?.toString(),
+          }).toList(),
+          'lateSupplierOrders': lateOrders.map((row) => {
+            'id': row[0], 'supplierName': row[1], 'materialName': row[2],
+            'expectedAt': row[3]?.toString(), 'daysLate': row[4],
+          }).toList(),
+          'overduePlans': overduePlans.map((row) => {
+            'id': row[0], 'title': row[1], 'dueDate': row[2]?.toString(),
+            'remaining': row[3],
+          }).toList(),
+        });
+      } catch (e) {
+        print('alerts xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+  }
+}

@@ -4,6 +4,7 @@ import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_router/shelf_router.dart';
 import 'database/connection.dart';
+import 'factoryhub/api.dart';
 
 void main() async {
   print('🚀 Starting Dart Backend Server...');
@@ -1334,6 +1335,9 @@ void main() async {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
     }
   });
+
+  // ─── FACTORY HUB MODULE (mounted under /fh) ──────────────────────────────────
+  router.mount('/fh/', fhHandler);
 
   // ─── CORS HANDLER ────────────────────────────────────────────────────────────
   final handler = (Request request) async {
