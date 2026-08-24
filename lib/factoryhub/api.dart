@@ -1461,5 +1461,83 @@ extension _FhRoutes on Router {
         return _json({'error': 'Server xatosi'}, status: 500);
       }
     });
+
+    // ---------- CRITICAL LEVELS (THRESHOLDS) ----------
+    get('/thresholds', (Request request) async {
+      final role = _role(request);
+      if (!Policy.canManageSettings(role)) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final typeParam = request.url.queryParameters['type'];
+        final rows = await db.execute(
+          '''
+          SELECT t.id,
+                 t.item_type,
+                 COALESCE(t.ref_barcode, t.ref_id::text) AS ref_key,
+                 COALESCE(p.name, rm.name) AS name,
+                 t.min_qty,
+                 COALESCE(bal.balance, 0) AS balance
+          FROM fh.stock_thresholds t
+          LEFT JOIN public.products p
+            ON t.item_type = 'product' AND p.barcode = t.ref_barcode
+          LEFT JOIN public.raw_materials rm
+            ON t.item_type = 'raw_material' AND rm.id = t.ref_id
+          LEFT JOIN (
+            SELECT item_type,
+                   COALESCE(ref_barcode, ref_id::text) AS ref_key,
+                   SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END) AS balance
+            FROM fh.stock_ledger
+            GROUP BY item_type, COALESCE(ref_barcode, ref_id::text)
+          ) bal ON bal.item_type = t.item_type AND bal.ref_key = COALESCE(t.ref_barcode, t.ref_id::text)
+          WHERE (\$1::text IS NULL OR t.item_type = \$1)
+          ORDER BY (COALESCE(bal.balance, 0) < t.min_qty) DESC, name NULLS LAST
+        ''',
+          parameters: [typeParam],
+        );
+        return _json({
+          'thresholds': rows.map((r) => {
+                'id': r[0],
+                'itemType': r[1],
+                'refKey': r[2],
+                'name': r[3] ?? r[2],
+                'minQty': r[4]?.toString(),
+                'balance': r[5]?.toString(),
+              }).toList(),
+        });
+      } catch (e) {
+        print('thresholds GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    put('/thresholds', (Request request) async {
+      final role = _role(request);
+      if (!Policy.canManageSettings(role)) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final id = body['id'] as int?;
+        final minQty = (body['min_qty'] as num?)?.toDouble();
+        if (id == null || minQty == null || minQty < 0) {
+          return _json(
+              {'error': "id va min_qty (>=0) majburiy"}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          'UPDATE fh.stock_thresholds SET min_qty = \$1 WHERE id = \$2',
+          parameters: [minQty, id],
+        );
+        if (res.affectedRows == 0) {
+          return _json({'error': 'Topilmadi'}, status: 404);
+        }
+        return _json({'ok': true});
+      } catch (e) {
+        print('thresholds PUT xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
   }
 }

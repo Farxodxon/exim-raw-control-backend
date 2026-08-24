@@ -15,3 +15,4 @@ dependencies:
 
 dev_dependencies:
   lints: ^3.0.0
+  spreadsheet_decoder: ^2.3.0
