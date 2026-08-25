@@ -543,11 +543,18 @@ void main() async {
   router.get('/api/partners', (Request request) async {
     try {
       final conn = await DatabaseConnection.getConnection();
-      final result = await conn.execute('SELECT * FROM partners ORDER BY firma_nomi');
+      final result = await conn.execute('''
+        SELECT id, firma_nomi, firma_turi, shartnoma_raqami, davlati, faolligi, shartnoma_sanasi,
+          created_at, yuridik_manzil, inn_kpp, bank_nomi, bank_manzili, hisob_raqami, swift_bik, direktor_ismi
+        FROM partners ORDER BY firma_nomi
+      ''');
       final partners = result.map((row) => {
         'id': row[0], 'firma_nomi': row[1], 'firma_turi': row[2],
         'shartnoma_raqami': row[3], 'davlati': row[4], 'faolligi': row[5],
         'shartnoma_sanasi': row[6]?.toString(), 'created_at': row[7]?.toString(),
+        'yuridik_manzil': row[8], 'inn_kpp': row[9], 'bank_nomi': row[10],
+        'bank_manzili': row[11], 'hisob_raqami': row[12], 'swift_bik': row[13],
+        'direktor_ismi': row[14],
       }).toList();
       return Response.ok(jsonEncode(partners), headers: {'Content-Type': 'application/json'});
     } catch (e) {
@@ -560,19 +567,31 @@ void main() async {
     try {
       final body = jsonDecode(await request.readAsString());
       final conn = await DatabaseConnection.getConnection();
-      final result = await conn.execute(
-        '''INSERT INTO partners (firma_nomi, firma_turi, shartnoma_raqami, davlati, faolligi, shartnoma_sanasi)
-          VALUES (\$1, \$2, \$3, \$4, \$5, \$6) RETURNING *''',
+      final insertResult = await conn.execute(
+        '''INSERT INTO partners (firma_nomi, firma_turi, shartnoma_raqami, davlati, faolligi, shartnoma_sanasi,
+          yuridik_manzil, inn_kpp, bank_nomi, bank_manzili, hisob_raqami, swift_bik, direktor_ismi)
+          VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13) RETURNING id''',
         parameters: [
           body['firma_nomi'], body['firma_turi'], body['shartnoma_raqami'],
           body['davlati'], body['faolligi'] ?? true, body['shartnoma_sanasi'],
+          body['yuridik_manzil'], body['inn_kpp'], body['bank_nomi'],
+          body['bank_manzili'], body['hisob_raqami'], body['swift_bik'], body['direktor_ismi'],
         ],
       );
+      final newId = insertResult.first[0];
+      final result = await conn.execute('''
+        SELECT id, firma_nomi, firma_turi, shartnoma_raqami, davlati, faolligi, shartnoma_sanasi,
+          created_at, yuridik_manzil, inn_kpp, bank_nomi, bank_manzili, hisob_raqami, swift_bik, direktor_ismi
+        FROM partners WHERE id = \$1
+      ''', parameters: [newId]);
       final row = result.first;
       return Response.ok(jsonEncode({
         'id': row[0], 'firma_nomi': row[1], 'firma_turi': row[2],
         'shartnoma_raqami': row[3], 'davlati': row[4], 'faolligi': row[5],
         'shartnoma_sanasi': row[6]?.toString(), 'created_at': row[7]?.toString(),
+        'yuridik_manzil': row[8], 'inn_kpp': row[9], 'bank_nomi': row[10],
+        'bank_manzili': row[11], 'hisob_raqami': row[12], 'swift_bik': row[13],
+        'direktor_ismi': row[14],
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
@@ -584,23 +603,36 @@ void main() async {
     try {
       final body = jsonDecode(await request.readAsString());
       final conn = await DatabaseConnection.getConnection();
-      final result = await conn.execute(
+      final updateResult = await conn.execute(
         '''UPDATE partners SET firma_nomi=\$1, firma_turi=\$2, shartnoma_raqami=\$3,
-          davlati=\$4, faolligi=\$5, shartnoma_sanasi=\$6 WHERE id=\$7 RETURNING *''',
+          davlati=\$4, faolligi=\$5, shartnoma_sanasi=\$6, yuridik_manzil=\$7, inn_kpp=\$8,
+          bank_nomi=\$9, bank_manzili=\$10, hisob_raqami=\$11, swift_bik=\$12, direktor_ismi=\$13
+          WHERE id=\$14 RETURNING id''',
         parameters: [
           body['firma_nomi'], body['firma_turi'], body['shartnoma_raqami'],
-          body['davlati'], body['faolligi'], body['shartnoma_sanasi'], int.parse(id),
+          body['davlati'], body['faolligi'], body['shartnoma_sanasi'],
+          body['yuridik_manzil'], body['inn_kpp'], body['bank_nomi'],
+          body['bank_manzili'], body['hisob_raqami'], body['swift_bik'], body['direktor_ismi'],
+          int.parse(id),
         ],
       );
-      if (result.isEmpty) {
+      if (updateResult.isEmpty) {
         return Response(404, body: jsonEncode({'error': 'Topilmadi'}),
           headers: {'Content-Type': 'application/json'});
       }
+      final result = await conn.execute('''
+        SELECT id, firma_nomi, firma_turi, shartnoma_raqami, davlati, faolligi, shartnoma_sanasi,
+          created_at, yuridik_manzil, inn_kpp, bank_nomi, bank_manzili, hisob_raqami, swift_bik, direktor_ismi
+        FROM partners WHERE id = \$1
+      ''', parameters: [int.parse(id)]);
       final row = result.first;
       return Response.ok(jsonEncode({
         'id': row[0], 'firma_nomi': row[1], 'firma_turi': row[2],
         'shartnoma_raqami': row[3], 'davlati': row[4], 'faolligi': row[5],
         'shartnoma_sanasi': row[6]?.toString(), 'created_at': row[7]?.toString(),
+        'yuridik_manzil': row[8], 'inn_kpp': row[9], 'bank_nomi': row[10],
+        'bank_manzili': row[11], 'hisob_raqami': row[12], 'swift_bik': row[13],
+        'direktor_ismi': row[14],
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
@@ -613,6 +645,55 @@ void main() async {
       final conn = await DatabaseConnection.getConnection();
       await conn.execute('DELETE FROM partners WHERE id=\$1', parameters: [int.parse(id)]);
       return Response.ok(jsonEncode({'message': "O'chirildi"}),
+        headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // GET /api/own-company — Éclair (sotuvchi) rekvizitlari
+  router.get('/api/own-company', (Request request) async {
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      final result = await conn.execute('''
+        SELECT id, nomi, yuridik_manzil, okpo, okonx, inn, bank_nomi, bank_manzili,
+          hisob_raqami, swift_bik, korrespondent_bank, korrespondent_swift, korrespondent_ass, direktor_ismi
+        FROM own_company LIMIT 1
+      ''');
+      if (result.isEmpty) {
+        return Response.notFound(jsonEncode({'error': "own_company bo'sh"}),
+          headers: {'Content-Type': 'application/json'});
+      }
+      final row = result.first;
+      return Response.ok(jsonEncode({
+        'id': row[0], 'nomi': row[1], 'yuridik_manzil': row[2], 'okpo': row[3],
+        'okonx': row[4], 'inn': row[5], 'bank_nomi': row[6], 'bank_manzili': row[7],
+        'hisob_raqami': row[8], 'swift_bik': row[9], 'korrespondent_bank': row[10],
+        'korrespondent_swift': row[11], 'korrespondent_ass': row[12], 'direktor_ismi': row[13],
+      }), headers: {'Content-Type': 'application/json'});
+    } catch (e) {
+      return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
+    }
+  });
+
+  // PUT /api/own-company/:id — Éclair rekvizitlarini tahrirlash
+  router.put('/api/own-company/<id>', (Request request, String id) async {
+    try {
+      final body = jsonDecode(await request.readAsString());
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('''
+        UPDATE own_company SET nomi=\$1, yuridik_manzil=\$2, okpo=\$3, okonx=\$4, inn=\$5,
+          bank_nomi=\$6, bank_manzili=\$7, hisob_raqami=\$8, swift_bik=\$9,
+          korrespondent_bank=\$10, korrespondent_swift=\$11, korrespondent_ass=\$12,
+          direktor_ismi=\$13, updated_at=NOW()
+        WHERE id=\$14
+      ''', parameters: [
+        body['nomi'], body['yuridik_manzil'], body['okpo'], body['okonx'], body['inn'],
+        body['bank_nomi'], body['bank_manzili'], body['hisob_raqami'], body['swift_bik'],
+        body['korrespondent_bank'], body['korrespondent_swift'], body['korrespondent_ass'],
+        body['direktor_ismi'], int.parse(id),
+      ]);
+      return Response.ok(jsonEncode({'message': 'Yangilandi'}),
         headers: {'Content-Type': 'application/json'});
     } catch (e) {
       return Response.internalServerError(body: jsonEncode({'error': e.toString()}));
