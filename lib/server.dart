@@ -1220,7 +1220,9 @@ void main() async {
 
       final orderRes = await conn.execute('''
         SELECT o.id, o.order_number, o.certification_number, o.order_date,
-          p.firma_nomi, p.davlati, p.shartnoma_raqami, p.shartnoma_sanasi
+          p.firma_nomi, p.davlati, p.shartnoma_raqami, p.shartnoma_sanasi,
+          p.yuridik_manzil, p.inn_kpp, p.bank_nomi, p.bank_manzili, p.hisob_raqami,
+          p.swift_bik, p.direktor_ismi
         FROM orders o
         LEFT JOIN partners p ON p.id = o.partner_id
         WHERE o.id = \$1
@@ -1230,6 +1232,23 @@ void main() async {
           headers: {'Content-Type': 'application/json'});
       }
       final orderRow = orderRes.first;
+
+      final companyRes = await conn.execute('''
+        SELECT nomi, yuridik_manzil, okpo, okonx, inn, bank_nomi, bank_manzili,
+          hisob_raqami, swift_bik, korrespondent_bank, korrespondent_swift,
+          korrespondent_ass, direktor_ismi
+        FROM own_company LIMIT 1
+      ''');
+      Map<String, dynamic>? seller;
+      if (companyRes.isNotEmpty) {
+        final c = companyRes.first;
+        seller = {
+          'nomi': c[0], 'yuridik_manzil': c[1], 'okpo': c[2], 'okonx': c[3], 'inn': c[4],
+          'bank_nomi': c[5], 'bank_manzili': c[6], 'hisob_raqami': c[7], 'swift_bik': c[8],
+          'korrespondent_bank': c[9], 'korrespondent_swift': c[10], 'korrespondent_ass': c[11],
+          'direktor_ismi': c[12],
+        };
+      }
 
       final itemsRes = await conn.execute('''
         SELECT oi.barcode, p.name, p.composition_text, oi.quantity, p.pcs_in_box,
@@ -1264,7 +1283,11 @@ void main() async {
           'id': orderRow[0], 'order_number': orderRow[1], 'certification_number': orderRow[2],
           'order_date': orderRow[3]?.toString(), 'firma_nomi': orderRow[4], 'davlati': orderRow[5],
           'shartnoma_raqami': orderRow[6], 'shartnoma_sanasi': orderRow[7]?.toString(),
+          'yuridik_manzil': orderRow[8], 'inn_kpp': orderRow[9], 'bank_nomi': orderRow[10],
+          'bank_manzili': orderRow[11], 'hisob_raqami': orderRow[12], 'swift_bik': orderRow[13],
+          'direktor_ismi': orderRow[14],
         },
+        'seller': seller,
         'items': items,
       }), headers: {'Content-Type': 'application/json'});
     } catch (e) {
