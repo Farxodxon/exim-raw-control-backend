@@ -655,16 +655,23 @@ extension _FhRoutes on Router {
 
         final stockResult = await db.execute(
           '''
-          SELECT item_type,
-                 COALESCE(ref_id::text, ref_barcode) AS ref_key,
-                 MAX(name_snapshot) AS name,
-                 MAX(unit) AS unit,
-                 SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END) AS balance
-          FROM fh.stock_ledger
-          WHERE warehouse_id = \$1
-          GROUP BY item_type, COALESCE(ref_id::text, ref_barcode)
-          HAVING SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END) <> 0
-          ORDER BY item_type, name
+          SELECT l.item_type,
+                 COALESCE(
+                   CASE WHEN l.item_type = 'raw_material' THEN rm.code ELSE NULL END,
+                   l.ref_barcode
+                 ) AS ref_key,
+                 MAX(l.name_snapshot) AS name,
+                 MAX(l.unit) AS unit,
+                 SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) AS balance
+          FROM fh.stock_ledger l
+          LEFT JOIN public.raw_materials rm ON rm.id = l.ref_id
+          WHERE l.warehouse_id = \$1
+          GROUP BY l.item_type, COALESCE(
+                   CASE WHEN l.item_type = 'raw_material' THEN rm.code ELSE NULL END,
+                   l.ref_barcode
+                 )
+          HAVING SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) <> 0
+          ORDER BY l.item_type, name
           ''',
           parameters: [warehouseId],
         );
@@ -714,9 +721,11 @@ extension _FhRoutes on Router {
           '''
           SELECT l.id, l.item_type, l.ref_id, l.ref_barcode, l.name_snapshot,
                  l.unit, l.direction, l.qty, l.source_type, l.note,
-                 l.created_at, u.username
+                 l.created_at, u.username,
+                 CASE WHEN l.item_type = 'raw_material' THEN rm.code ELSE l.ref_barcode END AS code
           FROM fh.stock_ledger l
           LEFT JOIN fh.users u ON u.id = l.performed_by
+          LEFT JOIN public.raw_materials rm ON rm.id = l.ref_id
           WHERE l.warehouse_id = \$1
           ORDER BY l.created_at DESC
           LIMIT \$2
@@ -737,6 +746,7 @@ extension _FhRoutes on Router {
           'note': row[9],
           'createdAt': row[10]?.toString(),
           'performedBy': row[11],
+          'code': row[12],
         }).toList();
 
         return _json({'transactions': transactions, 'total': transactions.length});
@@ -893,14 +903,21 @@ extension _FhRoutes on Router {
           '''
           SELECT w.id AS warehouse_id, w.name AS warehouse_name, w.type,
                  l.item_type,
-                 COALESCE(l.ref_id::text, l.ref_barcode) AS ref_key,
+                 COALESCE(
+                   CASE WHEN l.item_type = 'raw_material' THEN rm.code ELSE NULL END,
+                   l.ref_barcode
+                 ) AS ref_key,
                  MAX(l.name_snapshot) AS name,
                  MAX(l.unit) AS unit,
                  SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) AS balance
           FROM fh.stock_ledger l
           JOIN fh.warehouses w ON w.id = l.warehouse_id
+          LEFT JOIN public.raw_materials rm ON rm.id = l.ref_id
           WHERE (\$1::int IS NULL OR w.id = \$1)
-          GROUP BY w.id, w.name, w.type, l.item_type, COALESCE(l.ref_id::text, l.ref_barcode)
+          GROUP BY w.id, w.name, w.type, l.item_type, COALESCE(
+                   CASE WHEN l.item_type = 'raw_material' THEN rm.code ELSE NULL END,
+                   l.ref_barcode
+                 )
           HAVING SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) > 0
           ORDER BY w.name, l.item_type
           ''',
@@ -953,11 +970,15 @@ extension _FhRoutes on Router {
         final result = await db.execute(
           '''
           SELECT l.created_at, w.name AS warehouse_name, l.direction,
-                 COALESCE(l.ref_id::text, l.ref_barcode) AS ref_key,
+                 COALESCE(
+                   CASE WHEN l.item_type = 'raw_material' THEN rm.code ELSE NULL END,
+                   l.ref_barcode
+                 ) AS ref_key,
                  l.name_snapshot, l.unit, l.qty, l.note, u.username
           FROM fh.stock_ledger l
           JOIN fh.warehouses w ON w.id = l.warehouse_id
           LEFT JOIN fh.users u ON u.id = l.performed_by
+          LEFT JOIN public.raw_materials rm ON rm.id = l.ref_id
           $where
           ORDER BY l.created_at DESC
           ''',
