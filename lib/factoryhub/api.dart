@@ -1016,6 +1016,343 @@ extension _FhRoutes on Router {
       }
     });
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    // PRODUCT ↔ WAREHOUSE ASSIGNMENTS (Many-to-Many)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    get('/product-warehouses', (Request request) async {
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          'SELECT id, item_type, ref_id, ref_barcode, warehouse_id, created_at '
+          'FROM fh.product_warehouses ORDER BY id',
+        );
+        final list = result.map((r) => {
+          'id': r[0], 'itemType': r[1], 'refId': r[2],
+          'refBarcode': r[3], 'warehouseId': r[4],
+          'createdAt': r[5]?.toString(),
+        }).toList();
+        return _json({'assignments': list, 'total': list.length});
+      } catch (e) {
+        print('product-warehouses GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/product-warehouses', (Request request) async {
+      if (!Policy.canControlWarehouses(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final itemType = body['item_type'] as String?;
+        final refId = body['ref_id'] as int?;
+        final refBarcode = body['ref_barcode'] as String?;
+        final warehouseIds = body['warehouse_ids'] as List<dynamic>?;
+        if (itemType == null || warehouseIds == null || warehouseIds.isEmpty) {
+          return _json({'error': 'item_type va warehouse_ids majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        await db.execute('DELETE FROM fh.product_warehouses WHERE item_type = \$1 '
+            'AND COALESCE(ref_id::text, \'\') = COALESCE(\$2::text, \'\') '
+            'AND COALESCE(ref_barcode, \'\') = COALESCE(\$3, \'\')',
+          parameters: [itemType, refId?.toString(), refBarcode ?? '']);
+        for (final wid in warehouseIds) {
+          await db.execute(
+            'INSERT INTO fh.product_warehouses (item_type, ref_id, ref_barcode, warehouse_id) '
+            'VALUES (\$1, \$2, \$3, \$4) ON CONFLICT DO NOTHING',
+            parameters: [itemType, refId, refBarcode, wid],
+          );
+        }
+        return _json({'message': 'Omborlar yangilandi', 'count': warehouseIds.length});
+      } catch (e) {
+        print('product-warehouses POST xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    delete('/product-warehouses', (Request request) async {
+      if (!Policy.canControlWarehouses(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final itemType = body['item_type'] as String?;
+        final refId = body['ref_id'] as int?;
+        final refBarcode = body['ref_barcode'] as String?;
+        if (itemType == null) return _json({'error': 'item_type majburiy'}, status: 400);
+        final db = await DatabaseConnection.getConnection();
+        await db.execute('DELETE FROM fh.product_warehouses WHERE item_type = \$1 '
+            'AND COALESCE(ref_id::text, \'\') = COALESCE(\$2::text, \'\') '
+            'AND COALESCE(ref_barcode, \'\') = COALESCE(\$3, \'\')',
+          parameters: [itemType, refId?.toString(), refBarcode ?? '']);
+        return _json({'message': 'O\'chirildi'});
+      } catch (e) {
+        print('product-warehouses DELETE xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    get('/product-warehouses/<id>', (Request request, String id) async {
+      try {
+        final warehouseId = int.tryParse(id);
+        if (warehouseId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          'SELECT id, item_type, ref_id, ref_barcode, warehouse_id '
+          'FROM fh.product_warehouses WHERE warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
+        final list = result.map((r) => {
+          'id': r[0], 'itemType': r[1], 'refId': r[2],
+          'refBarcode': r[3], 'warehouseId': r[4],
+        }).toList();
+        return _json({'assignments': list});
+      } catch (e) {
+        print('product-warehouses/:id GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // INTER-WAREHOUSE TRANSFERS
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    get('/transfers', (Request request) async {
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute('''
+          SELECT t.id, fw.name AS from_name, tw.name AS to_name,
+                 t.status, t.note, u.username, t.created_at, t.completed_at,
+                 (SELECT COUNT(*) FROM fh.transfer_items ti WHERE ti.transfer_id = t.id) AS item_count
+          FROM fh.transfers t
+          JOIN fh.warehouses fw ON fw.id = t.from_warehouse_id
+          JOIN fh.warehouses tw ON tw.id = t.to_warehouse_id
+          LEFT JOIN fh.users u ON u.id = t.created_by
+          ORDER BY t.created_at DESC LIMIT 100
+        ''');
+        final list = result.map((r) => {
+          'id': r[0], 'fromWarehouse': r[1], 'toWarehouse': r[2],
+          'status': r[3], 'note': r[4], 'createdBy': r[5],
+          'createdAt': r[6]?.toString(), 'completedAt': r[7]?.toString(),
+          'itemCount': r[8],
+        }).toList();
+        return _json({'transfers': list, 'total': list.length});
+      } catch (e) {
+        print('transfers GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    get('/transfers/<id>', (Request request, String id) async {
+      try {
+        final transferId = int.tryParse(id);
+        if (transferId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+        final db = await DatabaseConnection.getConnection();
+        final info = await db.execute('''
+          SELECT t.id, t.from_warehouse_id, fw.name, t.to_warehouse_id, tw.name,
+                 t.status, t.note, u.username, t.created_at, t.completed_at
+          FROM fh.transfers t
+          JOIN fh.warehouses fw ON fw.id = t.from_warehouse_id
+          JOIN fh.warehouses tw ON tw.id = t.to_warehouse_id
+          LEFT JOIN fh.users u ON u.id = t.created_by
+          WHERE t.id = \$1
+        ''', parameters: [transferId]);
+        if (info.isEmpty) return _json({'error': 'Topilmadi'}, status: 404);
+        final r = info.first;
+        final items = await db.execute('''
+          SELECT id, item_type, ref_id, ref_barcode, name_snapshot, unit, qty
+          FROM fh.transfer_items WHERE transfer_id = \$1 ORDER BY id
+        ''', parameters: [transferId]);
+        return _json({
+          'transfer': {
+            'id': r[0], 'fromWarehouseId': r[1], 'fromWarehouse': r[2],
+            'toWarehouseId': r[3], 'toWarehouse': r[4],
+            'status': r[5], 'note': r[6], 'createdBy': r[7],
+            'createdAt': r[8]?.toString(), 'completedAt': r[9]?.toString(),
+          },
+          'items': items.map((i) => {
+            'id': i[0], 'itemType': i[1], 'refId': i[2],
+            'refBarcode': i[3], 'name': i[4], 'unit': i[5], 'qty': i[6]?.toString(),
+          }).toList(),
+        });
+      } catch (e) {
+        print('transfers/:id GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/transfers', (Request request) async {
+      final role = _role(request);
+      if (!Policy.canTransactStock(role)) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final fromId = body['from_warehouse_id'] as int?;
+        final toId = body['to_warehouse_id'] as int?;
+        final items = body['items'] as List<dynamic>?;
+        final note = body['note'] as String?;
+        if (fromId == null || toId == null || items == null || items.isEmpty) {
+          return _json({'error': 'from_warehouse_id, to_warehouse_id, items majburiy'}, status: 400);
+        }
+        if (fromId == toId) return _json({'error': 'Jo\'natuvchi va qabul qiluvchi ombor bir xil'}, status: 400);
+        final userId = _uid(request);
+        final db = await DatabaseConnection.getConnection();
+
+        await db.execute('BEGIN');
+        try {
+          final tr = await db.execute(
+            'INSERT INTO fh.transfers (from_warehouse_id, to_warehouse_id, note, created_by) '
+            'VALUES (\$1, \$2, \$3, \$4) RETURNING id',
+            parameters: [fromId, toId, note, userId],
+          );
+          final transferId = tr.first[0];
+
+          for (final item in items) {
+            final itemType = item['item_type'] as String?;
+            final refId = item['ref_id'] as int?;
+            final refBarcode = item['ref_barcode'] as String?;
+            final nameSnapshot = item['name'] as String?;
+            final unit = item['unit'] as String?;
+            final qty = (item['qty'] as num?)?.toDouble();
+            if (itemType == null || qty == null || qty <= 0) continue;
+
+            await db.execute(
+              'INSERT INTO fh.transfer_items (transfer_id, item_type, ref_id, ref_barcode, name_snapshot, unit, qty) '
+              'VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7)',
+              parameters: [transferId, itemType, refId, refBarcode, nameSnapshot, unit, qty],
+            );
+
+            if (role == AppRoles.warehouseKeeper && userId != null) {
+              final allowedFrom = await db.execute(
+                'SELECT 1 FROM fh.user_warehouses WHERE user_id = \$1 AND warehouse_id = \$2',
+                parameters: [userId, fromId],
+              );
+              if (allowedFrom.isEmpty) {
+                await db.execute('ROLLBACK');
+                return _json({'error': 'Jo\'natuvchi omborga ruxsat yoq'}, status: 403);
+              }
+            }
+
+            await db.execute(
+              'INSERT INTO fh.stock_ledger (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit, direction, qty, source_type, source_ref, performed_by, note) '
+              'VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \'out\', \$7, \'transfer_out\', \$8::text, \$9, \$10)',
+              parameters: [fromId, itemType, refId, refBarcode, nameSnapshot, unit, qty, transferId, userId, 'Transfer #$transferId'],
+            );
+
+            await db.execute(
+              'INSERT INTO fh.stock_ledger (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit, direction, qty, source_type, source_ref, performed_by, note) '
+              'VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \'in\', \$7, \'transfer_in\', \$8::text, \$9, \$10)',
+              parameters: [toId, itemType, refId, refBarcode, nameSnapshot, unit, qty, transferId, userId, 'Transfer #$transferId'],
+            );
+          }
+
+          await db.execute(
+            'UPDATE fh.transfers SET status = \'completed\', completed_at = NOW() WHERE id = \$1',
+            parameters: [transferId],
+          );
+          await db.execute('COMMIT');
+          return _json({'message': 'Transfer bajarildi', 'transfer_id': transferId}, status: 201);
+        } catch (e) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('transfers POST xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // WAREHOUSE REPORT (detailed per-warehouse)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    get('/reports/warehouse', (Request request) async {
+      try {
+        final warehouseId = int.tryParse(request.url.queryParameters['warehouse_id'] ?? '');
+        final from = request.url.queryParameters['from'] ?? '';
+        final to = request.url.queryParameters['to'] ?? '';
+        if (warehouseId == null) return _json({'error': 'warehouse_id majburiy'}, status: 400);
+
+        final db = await DatabaseConnection.getConnection();
+
+        final whResult = await db.execute(
+          'SELECT id, name, type FROM fh.warehouses WHERE id = \$1',
+          parameters: [warehouseId],
+        );
+        if (whResult.isEmpty) return _json({'error': 'Ombor topilmadi'}, status: 404);
+        final wh = whResult.first;
+
+        final currentBalance = await db.execute(
+          '''
+          SELECT COALESCE(
+                   CASE WHEN l.item_type = \'raw_material\' THEN rm.code ELSE NULL END,
+                   l.ref_barcode
+                 ) AS ref_key,
+                 MAX(l.name_snapshot) AS name, MAX(l.unit) AS unit, l.item_type,
+                 SUM(CASE l.direction WHEN \'in\' THEN l.qty ELSE -l.qty END) AS balance
+          FROM fh.stock_ledger l
+          LEFT JOIN public.raw_materials rm ON rm.id = l.ref_id
+          WHERE l.warehouse_id = \$1
+          GROUP BY l.item_type, COALESCE(CASE WHEN l.item_type = \'raw_material\' THEN rm.code ELSE NULL END, l.ref_barcode)
+          HAVING SUM(CASE l.direction WHEN \'in\' THEN l.qty ELSE -l.qty END) <> 0
+          ORDER BY l.item_type, name
+          ''',
+          parameters: [warehouseId],
+        );
+
+        var dateFilter = '';
+        var params = <dynamic>[warehouseId];
+        var idx = 1;
+        if (from.isNotEmpty && to.isNotEmpty) {
+          idx++;
+          dateFilter = 'AND l.created_at >= \$$idx::date AND l.created_at < (\$${idx+1}::date + INTERVAL \'1 day\')';
+          params.addAll([from, to]);
+          idx += 1;
+        }
+
+        final incomeResult = await db.execute(
+          'SELECT COALESCE(SUM(l.qty), 0) FROM fh.stock_ledger l WHERE l.warehouse_id = \$1 AND l.direction = \'in\' $dateFilter',
+          parameters: params,
+        );
+        final expenseResult = await db.execute(
+          'SELECT COALESCE(SUM(l.qty), 0) FROM fh.stock_ledger l WHERE l.warehouse_id = \$1 AND l.direction = \'out\' $dateFilter',
+          parameters: params,
+        );
+
+        final transferOut = await db.execute(
+          'SELECT COALESCE(SUM(ti.qty), 0) FROM fh.transfer_items ti '
+          'JOIN fh.transfers t ON t.id = ti.transfer_id '
+          'WHERE t.from_warehouse_id = \$1 AND t.status = \'completed\' $dateFilter',
+          parameters: params,
+        );
+        final transferIn = await db.execute(
+          'SELECT COALESCE(SUM(ti.qty), 0) FROM fh.transfer_items ti '
+          'JOIN fh.transfers t ON t.id = ti.transfer_id '
+          'WHERE t.to_warehouse_id = \$1 AND t.status = \'completed\' $dateFilter',
+          parameters: params,
+        );
+
+        return _json({
+          'warehouse': {'id': wh[0], 'name': wh[1], 'type': wh[2]},
+          'balance': currentBalance.map((r) => {
+            'refKey': r[0], 'name': r[1], 'unit': r[2], 'itemType': r[3],
+            'balance': r[4]?.toString(),
+          }).toList(),
+          'summary': {
+            'totalIncome': incomeResult.first[0]?.toString(),
+            'totalExpense': expenseResult.first[0]?.toString(),
+            'transferOut': transferOut.first[0]?.toString(),
+            'transferIn': transferIn.first[0]?.toString(),
+          },
+        });
+      } catch (e) {
+        print('reports/warehouse xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
     // ---------- PLANS ----------
     get('/plans', (Request request) async {
       try {

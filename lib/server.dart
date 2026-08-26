@@ -17,6 +17,49 @@ void main() async {
       await conn.execute("ALTER TABLE fh.users ADD COLUMN IF NOT EXISTS department VARCHAR(100)");
       print('✅ fh.users.department column ensured');
     } catch (_) {}
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS fh.product_warehouses (
+          id SERIAL PRIMARY KEY,
+          item_type VARCHAR(50) NOT NULL,
+          ref_id INTEGER,
+          ref_barcode VARCHAR(100),
+          warehouse_id INTEGER NOT NULL REFERENCES fh.warehouses(id),
+          created_at TIMESTAMP DEFAULT NOW(),
+          UNIQUE(item_type, ref_id, ref_barcode, warehouse_id)
+        )
+      ''');
+      print('✅ fh.product_warehouses ensured');
+    } catch (_) {}
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS fh.transfers (
+          id SERIAL PRIMARY KEY,
+          from_warehouse_id INTEGER NOT NULL REFERENCES fh.warehouses(id),
+          to_warehouse_id INTEGER NOT NULL REFERENCES fh.warehouses(id),
+          status VARCHAR(20) DEFAULT 'pending',
+          note TEXT,
+          created_by INTEGER REFERENCES fh.users(id),
+          created_at TIMESTAMP DEFAULT NOW(),
+          completed_at TIMESTAMP
+        )
+      ''');
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS fh.transfer_items (
+          id SERIAL PRIMARY KEY,
+          transfer_id INTEGER NOT NULL REFERENCES fh.transfers(id),
+          item_type VARCHAR(50) NOT NULL,
+          ref_id INTEGER,
+          ref_barcode VARCHAR(100),
+          name_snapshot VARCHAR(255),
+          unit VARCHAR(20),
+          qty NUMERIC NOT NULL CHECK (qty > 0)
+        )
+      ''');
+      print('✅ fh.transfers + fh.transfer_items ensured');
+    } catch (_) {}
   } catch (e) {
     print('⚠️ Database not connected: \$e');
   }
