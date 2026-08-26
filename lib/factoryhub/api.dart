@@ -644,6 +644,64 @@ extension _FhRoutes on Router {
       }
     });
 
+    // ---------- WAREHOUSE TRANSACTIONS HISTORY ----------
+    get('/warehouses/<id>/transactions', (Request request, String id) async {
+      final warehouseId = int.tryParse(id);
+      if (warehouseId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+
+      final role = _role(request);
+      final userId = _uid(request);
+
+      try {
+        final db = await DatabaseConnection.getConnection();
+
+        if (role == AppRoles.warehouseKeeper && userId != null) {
+          final allowed = await db.execute(
+            'SELECT 1 FROM fh.user_warehouses WHERE user_id = \$1 AND warehouse_id = \$2',
+            parameters: [userId, warehouseId],
+          );
+          if (allowed.isEmpty) {
+            return _json({'error': 'Bu ombor sizga biriktirilmagan'}, status: 403);
+          }
+        }
+
+        final limit = int.tryParse(request.url.queryParameters['limit'] ?? '') ?? 50;
+        final result = await db.execute(
+          '''
+          SELECT l.id, l.item_type, l.ref_id, l.ref_barcode, l.name_snapshot,
+                 l.unit, l.direction, l.qty, l.source_type, l.note,
+                 l.created_at, u.username
+          FROM fh.stock_ledger l
+          LEFT JOIN fh.users u ON u.id = l.performed_by
+          WHERE l.warehouse_id = \$1
+          ORDER BY l.created_at DESC
+          LIMIT \$2
+          ''',
+          parameters: [warehouseId, limit],
+        );
+
+        final transactions = result.map((row) => {
+          'id': row[0],
+          'itemType': row[1],
+          'refId': row[2],
+          'refBarcode': row[3],
+          'name': row[4],
+          'unit': row[5],
+          'direction': row[6],
+          'qty': row[7]?.toString(),
+          'sourceType': row[8],
+          'note': row[9],
+          'createdAt': row[10]?.toString(),
+          'performedBy': row[11],
+        }).toList();
+
+        return _json({'transactions': transactions, 'total': transactions.length});
+      } catch (e) {
+        print('warehouse/:id/transactions xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
     // ---------- STOCK TRANSACTION ----------
     post('/warehouse/transaction', (Request request) async {
       final role = _role(request);
