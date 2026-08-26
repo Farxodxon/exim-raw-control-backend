@@ -257,7 +257,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    get('/users/<id|\d+>', (Request request, String id) async {
+    get('/users/<id>', (Request request, String id) async {
       final userId = int.tryParse(id);
       if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
@@ -302,7 +302,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    put('/users/<id|\d+>', (Request request, String id) async {
+    put('/users/<id>', (Request request, String id) async {
       final userId = int.tryParse(id);
       if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
@@ -337,7 +337,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    delete('/users/<id|\d+>', (Request request, String id) async {
+    delete('/users/<id>', (Request request, String id) async {
       final userId = int.tryParse(id);
       if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
@@ -575,7 +575,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    get('/warehouses/<id|\d+>', (Request request, String id) async {
+    get('/warehouses/<id>', (Request request, String id) async {
       final warehouseId = int.tryParse(id);
       if (warehouseId == null) {
         return _json({'error': "Noto'g'ri ID"}, status: 400);
@@ -897,7 +897,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    put('/plans/<id|\d+>', (Request request, String id) async {
+    put('/plans/<id>', (Request request, String id) async {
       final planId = int.tryParse(id);
       if (planId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
@@ -1037,7 +1037,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    put('/supplier-orders/<id|\d+>', (Request request, String id) async {
+    put('/supplier-orders/<id>', (Request request, String id) async {
       final orderId = int.tryParse(id);
       if (orderId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
@@ -1228,7 +1228,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    put('/production/<id|\d+>', (Request request, String id) async {
+    put('/production/<id>', (Request request, String id) async {
       final batchId = int.tryParse(id);
       if (batchId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
