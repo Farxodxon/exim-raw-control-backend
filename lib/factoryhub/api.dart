@@ -183,32 +183,33 @@ extension _FhRoutes on Router {
       }
       try {
         final db = await DatabaseConnection.getConnection();
-        final result = await db.execute(
-          '''SELECT u.id, u.username, u.email, COALESCE(u.role, 'warehouse_keeper'),
-             COALESCE(u.is_active, true), u.created_at
+          final result = await db.execute(
+            '''SELECT u.id, u.username, u.email, COALESCE(u.role, 'warehouse_keeper'),
+             COALESCE(u.is_active, true), u.created_at, COALESCE(u.department, '')
              FROM fh.users u ORDER BY u.id''',
-        );
-
-        final users = <Map<String, dynamic>>[];
-        for (final row in result) {
-          final wareResult = await db.execute(
-            '''SELECT w.id, w.name, w.type FROM fh.warehouses w
-               JOIN fh.user_warehouses uw ON uw.warehouse_id = w.id
-               WHERE uw.user_id = \$1''',
-            parameters: [row[0]],
           );
-          users.add({
-            'id': row[0],
-            'username': row[1],
-            'email': row[2],
-            'role': row[3],
-            'isActive': row[4],
-            'createdAt': row[5]?.toString(),
-            'warehouses': wareResult
-                .map((w) => {'id': w[0], 'name': w[1], 'type': w[2]})
-                .toList(),
-          });
-        }
+
+          final users = <Map<String, dynamic>>[];
+          for (final row in result) {
+            final wareResult = await db.execute(
+              '''SELECT w.id, w.name, w.type FROM fh.warehouses w
+                 JOIN fh.user_warehouses uw ON uw.warehouse_id = w.id
+                 WHERE uw.user_id = \$1''',
+              parameters: [row[0]],
+            );
+            users.add({
+              'id': row[0],
+              'username': row[1],
+              'email': row[2],
+              'role': row[3],
+              'isActive': row[4],
+              'createdAt': row[5]?.toString(),
+              'department': row[6],
+              'warehouses': wareResult
+                  .map((w) => {'id': w[0], 'name': w[1], 'type': w[2]})
+                  .toList(),
+            });
+          }
         return _json({'users': users, 'total': users.length});
       } catch (e) {
         print('users GET xato: $e');
@@ -242,6 +243,7 @@ extension _FhRoutes on Router {
           email: email,
           password: password,
           role: role,
+          department: body['department'] as String?,
         );
         if (user == null) {
           return _json({'error': 'Email band yoki rol xato'}, status: 409);
@@ -255,7 +257,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    get('/users/<id|#>', (Request request, String id) async {
+    get('/users/<id|\d+>', (Request request, String id) async {
       final userId = int.tryParse(id);
       if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
@@ -269,7 +271,7 @@ extension _FhRoutes on Router {
       try {
         final db = await DatabaseConnection.getConnection();
         final userResult = await db.execute(
-          'SELECT id, username, email, role, COALESCE(is_active, true) '
+          'SELECT id, username, email, role, COALESCE(is_active, true), COALESCE(department, \'\') '
           'FROM fh.users WHERE id = \$1',
           parameters: [userId],
         );
@@ -288,7 +290,7 @@ extension _FhRoutes on Router {
         return _json({
           'user': {
             'id': u[0], 'username': u[1], 'email': u[2],
-            'role': u[3], 'isActive': u[4],
+            'role': u[3], 'isActive': u[4], 'department': u[5],
           },
           'warehouses': wareResult
               .map((r) => {'id': r[0], 'name': r[1], 'type': r[2]})
@@ -300,7 +302,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    put('/users/<id|#>', (Request request, String id) async {
+    put('/users/<id|\d+>', (Request request, String id) async {
       final userId = int.tryParse(id);
       if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
@@ -321,6 +323,7 @@ extension _FhRoutes on Router {
           password: body['password'] as String?,
           role: canManage ? body['role'] as String? : null,
           isActive: canManage ? body['is_active'] as bool? : null,
+          department: canManage ? body['department'] as String? : null,
         );
         if (user == null) {
           return _json(
@@ -334,7 +337,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    delete('/users/<id|#>', (Request request, String id) async {
+    delete('/users/<id|\d+>', (Request request, String id) async {
       final userId = int.tryParse(id);
       if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
@@ -572,7 +575,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    get('/warehouses/<id|#>', (Request request, String id) async {
+    get('/warehouses/<id|\d+>', (Request request, String id) async {
       final warehouseId = int.tryParse(id);
       if (warehouseId == null) {
         return _json({'error': "Noto'g'ri ID"}, status: 400);
@@ -894,7 +897,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    put('/plans/<id|#>', (Request request, String id) async {
+    put('/plans/<id|\d+>', (Request request, String id) async {
       final planId = int.tryParse(id);
       if (planId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
@@ -904,6 +907,43 @@ extension _FhRoutes on Router {
 
       try {
         final body = await _body(request);
+        final db = await DatabaseConnection.getConnection();
+
+        final hasFields = body.containsKey('title') || body.containsKey('target_qty') ||
+            body.containsKey('due_date') || body.containsKey('barcode') ||
+            body.containsKey('description');
+
+        if (hasFields) {
+          final title = body['title'] as String?;
+          final description = body['description'] as String?;
+          final barcode = body['barcode'] as String?;
+          final targetQty = (body['target_qty'] as num?)?.toInt();
+          final dueDate = body['due_date'] as String?;
+
+          final sets = <String>[];
+          final params = <dynamic>[];
+          var idx = 1;
+          if (title != null) { sets.add('title = \$$idx'); params.add(title.trim()); idx++; }
+          if (description != null) { sets.add('description = \$$idx'); params.add(description); idx++; }
+          if (barcode != null) { sets.add('product_barcode = \$$idx'); params.add(barcode); idx++; }
+          if (targetQty != null && targetQty > 0) { sets.add('target_qty = \$$idx'); params.add(targetQty); idx++; }
+          if (dueDate != null) { sets.add('due_date = \$$idx::date'); params.add(dueDate); idx++; }
+
+          if (sets.isEmpty) {
+            return _json({'error': 'O\'zgartirish ko\'rsatilmadi'}, status: 400);
+          }
+
+          params.add(planId);
+          final result = await db.execute(
+            'UPDATE fh.plans SET ${sets.join(", ")} WHERE id = \$$idx RETURNING id',
+            parameters: params,
+          );
+          if (result.isEmpty) {
+            return _json({'error': 'Reja topilmadi'}, status: 404);
+          }
+          return _json({'message': 'Yangilandi'});
+        }
+
         final status = body['status'] as String?;
         final allowed = ['planned', 'in_progress', 'done', 'cancelled'];
 
@@ -911,7 +951,6 @@ extension _FhRoutes on Router {
           return _json({'error': 'status: $allowed'}, status: 400);
         }
 
-        final db = await DatabaseConnection.getConnection();
         final result = await db.execute(
           'UPDATE fh.plans SET status = \$2 WHERE id = \$1 RETURNING id',
           parameters: [planId, status],
@@ -998,7 +1037,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    put('/supplier-orders/<id|#>', (Request request, String id) async {
+    put('/supplier-orders/<id|\d+>', (Request request, String id) async {
       final orderId = int.tryParse(id);
       if (orderId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 
@@ -1112,12 +1151,6 @@ extension _FhRoutes on Router {
           ''',
           parameters: [barcode],
         );
-        if (norms.isEmpty) {
-          return _json({
-            'error': "Bu mahsulot uchun norma topilmadi ($barcode)",
-          }, status: 409);
-        }
-
         await db.execute('BEGIN');
         try {
           for (final norm in norms) {
@@ -1195,7 +1228,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    put('/production/<id|#>', (Request request, String id) async {
+    put('/production/<id|\d+>', (Request request, String id) async {
       final batchId = int.tryParse(id);
       if (batchId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
 

@@ -12,6 +12,11 @@ void main() async {
   try {
     await DatabaseConnection.getConnection();
     print('✅ Database connected');
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute("ALTER TABLE fh.users ADD COLUMN IF NOT EXISTS department VARCHAR(100)");
+      print('✅ fh.users.department column ensured');
+    } catch (_) {}
   } catch (e) {
     print('⚠️ Database not connected: \$e');
   }

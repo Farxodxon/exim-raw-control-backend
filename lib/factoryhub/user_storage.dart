@@ -6,7 +6,7 @@ import '../factoryhub/user.dart';
 class FhUserStorage {
   static const String _select =
       'SELECT id, username, email, COALESCE(role, \'warehouse_keeper\'), '
-      'COALESCE(is_active, true), created_at FROM fh.users';
+      'COALESCE(is_active, true), created_at, COALESCE(department, \'\') FROM fh.users';
 
   static Future<User?> login(String email, String password) async {
     final db = await DatabaseConnection.getConnection();
@@ -73,6 +73,7 @@ class FhUserStorage {
     required String email,
     required String password,
     required String role,
+    String? department,
   }) async {
     if (!AppRoles.isValid(role)) return null;
 
@@ -86,10 +87,10 @@ class FhUserStorage {
 
       final hashedPassword = BCrypt.hashpw(password, BCrypt.gensalt());
       final result = await db.execute(
-        'INSERT INTO fh.users (username, email, password, role) '
-        'VALUES (\$1, \$2, \$3, \$4) '
-        'RETURNING id, username, email, role, COALESCE(is_active, true), created_at',
-        parameters: [username, email, hashedPassword, role],
+        'INSERT INTO fh.users (username, email, password, role, department) '
+        'VALUES (\$1, \$2, \$3, \$4, \$5) '
+        'RETURNING id, username, email, role, COALESCE(is_active, true), created_at, COALESCE(department, \'\')',
+        parameters: [username, email, hashedPassword, role, department ?? ''],
       );
       return _rowToUser(result.first);
     } catch (e) {
@@ -128,6 +129,7 @@ class FhUserStorage {
     String? password,
     String? role,
     bool? isActive,
+    String? department,
   }) async {
     final db = await DatabaseConnection.getConnection();
     try {
@@ -148,6 +150,7 @@ class FhUserStorage {
       if (password != null) add('password', BCrypt.hashpw(password, BCrypt.gensalt()));
       if (role != null) add('role', role);
       if (isActive != null) add('is_active', isActive);
+      if (department != null) add('department', department);
 
       if (setParts.isEmpty) return null;
       params.add(id);
@@ -155,7 +158,7 @@ class FhUserStorage {
       final result = await db.execute(
         'UPDATE fh.users SET ${setParts.join(', ')} WHERE id = \$$idx '
         'RETURNING id, username, email, COALESCE(role, \'warehouse_keeper\'), '
-        'COALESCE(is_active, true), created_at',
+        'COALESCE(is_active, true), created_at, COALESCE(department, \'\')',
         parameters: params,
       );
 
@@ -174,6 +177,7 @@ class FhUserStorage {
       role: row[3] as String,
       isActive: row[4] as bool? ?? true,
       createdAt: row[5] as DateTime,
+      department: (row.length > 6 ? row[6] : null) as String? ?? '',
     );
   }
 }

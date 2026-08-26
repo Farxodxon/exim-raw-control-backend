@@ -5,6 +5,7 @@ class User {
   final String role;
   final bool isActive;
   final DateTime createdAt;
+  final String department;
 
   User({
     required this.id,
@@ -13,6 +14,7 @@ class User {
     required this.role,
     this.isActive = true,
     required this.createdAt,
+    this.department = '',
   });
 
   Map<String, dynamic> toJson() {
@@ -23,6 +25,7 @@ class User {
       'role': role,
       'isActive': isActive,
       'createdAt': createdAt.toIso8601String(),
+      'department': department,
     };
   }
 }
