@@ -1,10 +1,12 @@
 ﻿import 'dart:convert';
+import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
 import 'package:exim_raw_backend/database/connection.dart';
 import 'package:exim_raw_backend/factoryhub/jwt.dart';
 import 'package:exim_raw_backend/factoryhub/policy.dart';
 import 'package:exim_raw_backend/factoryhub/user_storage.dart';
+import 'package:excel/excel.dart';
 
 final Router _router = Router().._registerRoutes();
 
@@ -27,6 +29,48 @@ Map<String, dynamic> _user(Request request) =>
 String _role(Request request) => (_user(request)['role'] ?? '') as String;
 
 int? _uid(Request request) => _user(request)['user_id'] as int?;
+
+void _buildSheet(Excel excel, String sheetName, List<dynamic> rows, String direction, String from, String to) {
+  final sheet = excel[sheetName];
+
+  final headerStyle = CellStyle(
+    bold: true,
+    backgroundColorHex: ExcelColor.fromHexString('#1A6B3C'),
+    fontColorHex: ExcelColor.fromHexString('#FFFFFF'),
+    fontSize: 11,
+  );
+
+  final headers = ['Sana', 'Ombor', 'Kodi', 'Nomi', 'Birlik', 'Miqdor', 'Izoh', 'Bajarildi'];
+  for (var i = 0; i < headers.length; i++) {
+    final cell = sheet.cell(CellIndex.indexByColumnRow(columnIndex: i, rowIndex: 0));
+    cell.value = TextCellValue(headers[i]);
+    cell.cellStyle = headerStyle;
+  }
+
+  var rowIdx = 1;
+  for (final r in rows) {
+    final d = r[2]?.toString() ?? '';
+    if (d != direction) continue;
+
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: rowIdx)).value =
+        TextCellValue(r[0]?.toString() ?? '');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: rowIdx)).value =
+        TextCellValue(r[1]?.toString() ?? '');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 2, rowIndex: rowIdx)).value =
+        TextCellValue(r[3]?.toString() ?? '');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 3, rowIndex: rowIdx)).value =
+        TextCellValue(r[4]?.toString() ?? '');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 4, rowIndex: rowIdx)).value =
+        TextCellValue(r[5]?.toString() ?? '');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 5, rowIndex: rowIdx)).value =
+        TextCellValue(r[6]?.toString() ?? '');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 6, rowIndex: rowIdx)).value =
+        TextCellValue(r[7]?.toString() ?? '');
+    sheet.cell(CellIndex.indexByColumnRow(columnIndex: 7, rowIndex: rowIdx)).value =
+        TextCellValue(r[8]?.toString() ?? '');
+    rowIdx++;
+  }
+}
 
 Middleware _authMiddleware = (innerHandler) {
   return (request) async {
@@ -873,6 +917,80 @@ extension _FhRoutes on Router {
         });
       } catch (e) {
         print('stock xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- TRANSACTION REPORT (Excel) ----------
+    get('/reports/transactions', (Request request) async {
+      try {
+        final from = request.url.queryParameters['from'] ?? '';
+        final to = request.url.queryParameters['to'] ?? '';
+        final type = request.url.queryParameters['type'] ?? 'all';
+        final warehouseId = int.tryParse(request.url.queryParameters['warehouse_id'] ?? '');
+
+        if (from.isEmpty || to.isEmpty) {
+          return _json({'error': 'from va to sanalar majburiy (YYYY-MM-DD)'}, status: 400);
+        }
+
+        final db = await DatabaseConnection.getConnection();
+
+        var where = 'WHERE l.created_at >= \$1::date AND l.created_at < (\$2::date + INTERVAL \'1 day\')';
+        var params = <dynamic>[from, to];
+        var idx = 2;
+
+        if (warehouseId != null) {
+          idx++;
+          where += ' AND l.warehouse_id = \$$idx';
+          params.add(warehouseId);
+        }
+        if (type == 'in' || type == 'out') {
+          idx++;
+          where += ' AND l.direction = \$$idx';
+          params.add(type);
+        }
+
+        final result = await db.execute(
+          '''
+          SELECT l.created_at, w.name AS warehouse_name, l.direction,
+                 COALESCE(l.ref_id::text, l.ref_barcode) AS ref_key,
+                 l.name_snapshot, l.unit, l.qty, l.note, u.username
+          FROM fh.stock_ledger l
+          JOIN fh.warehouses w ON w.id = l.warehouse_id
+          LEFT JOIN fh.users u ON u.id = l.performed_by
+          $where
+          ORDER BY l.created_at DESC
+          ''',
+          parameters: params,
+        );
+
+        final excel = Excel.createExcel();
+
+        if (type == 'all') {
+          _buildSheet(excel, 'Kirim', result, 'in', from, to);
+          _buildSheet(excel, 'Chiqim', result, 'out', from, to);
+          excel.delete(excel.getDefaultSheet()!);
+        } else {
+          final sheetName = type == 'in' ? 'Kirim' : 'Chiqim';
+          _buildSheet(excel, sheetName, result, type, from, to);
+          excel.delete(excel.getDefaultSheet()!);
+        }
+
+        final bytes = excel.encode();
+        if (bytes == null) {
+          return _json({'error': 'Excel yaratilmadi'}, status: 500);
+        }
+
+        return Response(
+          200,
+          body: Uint8List.fromList(bytes),
+          headers: {
+            'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Content-Disposition': 'attachment; filename="hisobot_${from}_${to}.xlsx"',
+          },
+        );
+      } catch (e) {
+        print('report xato: $e');
         return _json({'error': 'Server xatosi'}, status: 500);
       }
     });
