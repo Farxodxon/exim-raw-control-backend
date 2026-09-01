@@ -730,29 +730,65 @@ extension _FhRoutes on Router {
       }
     });
 
-    delete('/warehouses', (Request request) async {
+    delete('/warehouses/<id>', (Request request, String id) async {
       if (!Policy.canControlWarehouses(_role(request))) {
         return _json({'error': 'Ruxsat yoq'}, status: 403);
       }
+      final warehouseId = int.tryParse(id);
+      if (warehouseId == null) {
+        return _json({'error': "Noto'g'ri ID"}, status: 400);
+      }
       try {
         final db = await DatabaseConnection.getConnection();
+        final exists = await db.execute(
+          'SELECT id FROM fh.warehouses WHERE id = \$1',
+          parameters: [warehouseId],
+        );
+        if (exists.isEmpty) {
+          return _json({'error': 'Topilmadi'}, status: 404);
+        }
         await db.execute('BEGIN');
-        await db.execute('DELETE FROM fh.warehouse_transfer_routes');
-        await db.execute('DELETE FROM fh.stock_writes');
-        await db.execute('DELETE FROM fh.transfer_items');
-        await db.execute('DELETE FROM fh.transfers');
-        await db.execute('DELETE FROM fh.production_batches');
-        await db.execute('DELETE FROM fh.stock_ledger');
-        await db.execute('DELETE FROM fh.product_warehouses');
-        await db.execute('DELETE FROM fh.user_warehouses');
-        final count = await db.execute('DELETE FROM fh.warehouses RETURNING id');
+        await db.execute(
+          'DELETE FROM fh.warehouse_transfer_routes WHERE from_warehouse_id = \$1 OR to_warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
+        await db.execute(
+          'DELETE FROM fh.stock_writes WHERE warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
+        await db.execute(
+          'DELETE FROM fh.transfer_items WHERE transfer_id IN '
+          '(SELECT id FROM fh.transfers WHERE from_warehouse_id = \$1 OR to_warehouse_id = \$1)',
+          parameters: [warehouseId],
+        );
+        await db.execute(
+          'DELETE FROM fh.transfers WHERE from_warehouse_id = \$1 OR to_warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
+        await db.execute(
+          'DELETE FROM fh.production_batches WHERE source_warehouse_id = \$1 OR dest_warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
+        await db.execute(
+          'DELETE FROM fh.stock_ledger WHERE warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
+        await db.execute(
+          'DELETE FROM fh.product_warehouses WHERE warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
+        await db.execute(
+          'DELETE FROM fh.user_warehouses WHERE warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
+        await db.execute(
+          'DELETE FROM fh.warehouses WHERE id = \$1',
+          parameters: [warehouseId],
+        );
         await db.execute('COMMIT');
-        return _json({
-          'message': 'Barcha omborlar o\'chirildi',
-          'deleted': count.length,
-        });
+        return _json({'message': 'Ombor o\'chirildi'});
       } catch (e) {
-        print('warehouses DELETE xato: $e');
+        print('warehouses/:id DELETE xato: $e');
         return _json({'error': 'Server xatosi'}, status: 500);
       }
     });
