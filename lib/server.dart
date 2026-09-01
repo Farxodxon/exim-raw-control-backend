@@ -76,6 +76,83 @@ void main() async {
       ''');
       print('✅ fh.transfers + fh.transfer_items ensured');
     } catch (_) {}
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS fh.items (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(200) NOT NULL,
+          item_type VARCHAR(50) NOT NULL,
+          code VARCHAR(50),
+          unit VARCHAR(20) DEFAULT 'dona',
+          content_ml NUMERIC,
+          is_active BOOLEAN DEFAULT true,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      ''');
+      print('✅ fh.items ensured');
+    } catch (_) {}
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS fh.boms (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(200) NOT NULL,
+          stage VARCHAR(50) NOT NULL,
+          output_item_id INTEGER REFERENCES fh.items(id),
+          output_qty_per_batch NUMERIC NOT NULL,
+          output_unit VARCHAR(20) DEFAULT 'dona',
+          is_active BOOLEAN DEFAULT true,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      ''');
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS fh.bom_items (
+          id SERIAL PRIMARY KEY,
+          bom_id INTEGER NOT NULL REFERENCES fh.boms(id) ON DELETE CASCADE,
+          item_type VARCHAR(50) NOT NULL,
+          ref_id INTEGER,
+          ref_barcode VARCHAR(100),
+          name_snapshot VARCHAR(255),
+          unit VARCHAR(20),
+          qty NUMERIC NOT NULL CHECK (qty > 0)
+        )
+      ''');
+      print('✅ fh.boms + fh.bom_items ensured');
+    } catch (_) {}
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS fh.stock_writes (
+          id SERIAL PRIMARY KEY,
+          warehouse_id INTEGER NOT NULL REFERENCES fh.warehouses(id),
+          item_type VARCHAR(50) NOT NULL,
+          ref_id INTEGER,
+          ref_barcode VARCHAR(100),
+          name_snapshot VARCHAR(255),
+          unit VARCHAR(20),
+          qty NUMERIC NOT NULL CHECK (qty > 0),
+          reason VARCHAR(200) NOT NULL,
+          note TEXT,
+          performed_by INTEGER REFERENCES fh.users(id),
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      ''');
+      print('✅ fh.stock_writes ensured');
+    } catch (_) {}
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute("ALTER TABLE fh.production_batches ADD COLUMN IF NOT EXISTS stage VARCHAR(50) DEFAULT 'mixing'");
+      await conn.execute("ALTER TABLE fh.production_batches ADD COLUMN IF NOT EXISTS bom_id INTEGER REFERENCES fh.boms(id)");
+      await conn.execute("ALTER TABLE fh.production_batches ADD COLUMN IF NOT EXISTS source_warehouse_id INTEGER REFERENCES fh.warehouses(id)");
+      await conn.execute("ALTER TABLE fh.production_batches ADD COLUMN IF NOT EXISTS dest_warehouse_id INTEGER REFERENCES fh.warehouses(id)");
+      await conn.execute("ALTER TABLE fh.stock_ledger DROP CONSTRAINT IF EXISTS stock_ledger_source_type_check");
+      await conn.execute("""
+        ALTER TABLE fh.stock_ledger ADD CONSTRAINT stock_ledger_source_type_check
+        CHECK (source_type IN ('manual', 'production_out', 'production_in', 'transfer_out', 'transfer_in', 'loss', 'write_off'))
+      """);
+      print('✅ fh.production_batches + stock_ledger source_type extended');
+    } catch (_) {}
   } catch (e) {
     print('⚠️ Database not connected: \$e');
   }
