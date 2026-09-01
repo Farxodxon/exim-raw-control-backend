@@ -24,6 +24,11 @@ void main() async {
       await conn.execute("ALTER TABLE fh.stock_ledger ADD COLUMN IF NOT EXISTS source_ref TEXT");
       await conn.execute("ALTER TABLE fh.stock_ledger ADD COLUMN IF NOT EXISTS performed_by INTEGER REFERENCES fh.users(id)");
       await conn.execute("ALTER TABLE fh.stock_ledger ADD COLUMN IF NOT EXISTS note TEXT");
+      await conn.execute("ALTER TABLE fh.stock_ledger DROP CONSTRAINT IF EXISTS stock_ledger_source_type_check");
+      await conn.execute("""
+        ALTER TABLE fh.stock_ledger ADD CONSTRAINT stock_ledger_source_type_check
+        CHECK (source_type IN ('manual', 'production_out', 'production_in', 'transfer_out', 'transfer_in'))
+      """);
       print('✅ fh.stock_ledger columns ensured');
     } catch (_) {}
     try {
