@@ -809,12 +809,42 @@ extension _FhRoutes on Router {
 
         final db = await DatabaseConnection.getConnection();
 
-        final wh = await db.execute(
-          'SELECT id FROM fh.warehouses WHERE id = \$1 AND is_active',
+        final whRow = await db.execute(
+          'SELECT id, type FROM fh.warehouses WHERE id = \$1 AND is_active',
           parameters: [warehouseId],
         );
-        if (wh.isEmpty) {
+        if (whRow.isEmpty) {
           return _json({'error': 'Ombor topilmadi'}, status: 404);
+        }
+        final whType = whRow.first[1] as String?;
+
+        // ── Qat'iy oqim nazorati (qo'lda kirim/chiqim) ──
+        // 1) Xom ashyo ombori: faqat qo'lda KIRIM ruxsat (yangi xom kelganda),
+        //    chiqim faqat ishlab chiqarish orqali.
+        if (whType == 'raw' && direction == 'out') {
+          return _json({
+            'error': 'Xom ashyo omboridan qo\'lda chiqim taqiqlangan. Chegirma ishlab chiqarish orqali amalga oshiriladi',
+          }, status: 403);
+        }
+        // 2) Tayyor mahsulot ombori: qo'lda kirim ham, chiqim ham taqiq.
+        //    Kirish faqat ishlab chiqarish (production_in) yoki transfer bilan.
+        if (whType == 'finished') {
+          return _json({
+            'error': 'Tayyor mahsulot omborida qo\'lda kirim/chiqim taqiqlangan. Kirish ishlab chiqarish va transfer orqali',
+          }, status: 403);
+        }
+        // 3) Sotuv ombori: qo'lda kirim taqiq (faqat transfer kiradi), chiqim = sotuv ruxsat.
+        if (whType == 'sales' && direction == 'in') {
+          return _json({
+            'error': 'Sotuv omboriga qo\'lda kirim taqiqlangan. Mahsulot transfer orqali kiradi',
+          }, status: 403);
+        }
+        // 4) Diler ombori: qo'lda kirim ham, chiqim ham taqiq.
+        //    Diler omboriga transfer = mahsulot SOTILDI (oxirgi bosqich).
+        if (whType == 'dealer') {
+          return _json({
+            'error': 'Diler omborida qo\'lda amallar taqiqlangan. Diler omboriga transfer = sotuv (oxirgi bosqich)',
+          }, status: 403);
         }
 
         if (role == AppRoles.warehouseKeeper && userId != null) {
@@ -1127,7 +1157,8 @@ extension _FhRoutes on Router {
         final result = await db.execute('''
           SELECT t.id, fw.name AS from_name, tw.name AS to_name,
                  t.status, t.note, u.username, t.created_at, t.completed_at,
-                 (SELECT COUNT(*) FROM fh.transfer_items ti WHERE ti.transfer_id = t.id) AS item_count
+                 (SELECT COUNT(*) FROM fh.transfer_items ti WHERE ti.transfer_id = t.id) AS item_count,
+                 t.is_sale
           FROM fh.transfers t
           JOIN fh.warehouses fw ON fw.id = t.from_warehouse_id
           JOIN fh.warehouses tw ON tw.id = t.to_warehouse_id
@@ -1138,7 +1169,7 @@ extension _FhRoutes on Router {
           'id': r[0], 'fromWarehouse': r[1], 'toWarehouse': r[2],
           'status': r[3], 'note': r[4], 'createdBy': r[5],
           'createdAt': r[6]?.toString(), 'completedAt': r[7]?.toString(),
-          'itemCount': r[8],
+          'itemCount': r[8], 'isSale': r[9] ?? false,
         }).toList();
         return _json({'transfers': list, 'total': list.length});
       } catch (e) {
@@ -1154,7 +1185,7 @@ extension _FhRoutes on Router {
         final db = await DatabaseConnection.getConnection();
         final info = await db.execute('''
           SELECT t.id, t.from_warehouse_id, fw.name, t.to_warehouse_id, tw.name,
-                 t.status, t.note, u.username, t.created_at, t.completed_at
+                 t.status, t.note, u.username, t.created_at, t.completed_at, t.is_sale
           FROM fh.transfers t
           JOIN fh.warehouses fw ON fw.id = t.from_warehouse_id
           JOIN fh.warehouses tw ON tw.id = t.to_warehouse_id
@@ -1173,6 +1204,7 @@ extension _FhRoutes on Router {
             'toWarehouseId': r[3], 'toWarehouse': r[4],
             'status': r[5], 'note': r[6], 'createdBy': r[7],
             'createdAt': r[8]?.toString(), 'completedAt': r[9]?.toString(),
+            'isSale': r[10] ?? false,
           },
           'items': items.map((i) => {
             'id': i[0], 'itemType': i[1], 'refId': i[2],
@@ -1203,12 +1235,45 @@ extension _FhRoutes on Router {
         final userId = _uid(request);
         final db = await DatabaseConnection.getConnection();
 
+        // ── Qat'iy oqim nazorati (transfer) ──
+        final whTypesRow = await db.execute(
+          'SELECT id, type FROM fh.warehouses WHERE id IN (\$1, \$2)',
+          parameters: [fromId, toId],
+        );
+        final Map<int, String?> whTypes = {
+          for (final r in whTypesRow) r[0] as int: r[1] as String?,
+        };
+        final fromType = whTypes[fromId];
+        final toType = whTypes[toId];
+        if (fromType == null || toType == null) {
+          return _json({'error': 'Ombor topilmadi'}, status: 404);
+        }
+        // Diler ombori oxirgi bosqich — undan chiqish taqiq.
+        if (fromType == 'dealer') {
+          return _json({
+            'error': 'Diler ombori oxirgi bosqich — undan transfer qilish mumkin emas',
+          }, status: 403);
+        }
+        // Xom ashyo omboridan chiqish faqat ishlab chiqarish orqali (transfer emas).
+        if (fromType == 'raw') {
+          return _json({
+            'error': 'Xom ashyo omboridan transfer taqiqlangan. Xom ashyo ishlab chiqarishga sarflanadi',
+          }, status: 403);
+        }
+        // Xom ashyo omboriga transfer (kirim) ham ruxsat emas — faqat qo'lda kirim.
+        if (toType == 'raw') {
+          return _json({
+            'error': 'Xom ashyo omboriga transfer bilan kirim taqiqlangan. Kirim qo\'lda amalga oshiriladi',
+          }, status: 403);
+        }
+        final bool isSale = toType == 'dealer';
+
         await db.execute('BEGIN');
         try {
           final tr = await db.execute(
-            'INSERT INTO fh.transfers (from_warehouse_id, to_warehouse_id, note, created_by) '
-            'VALUES (\$1, \$2, \$3, \$4) RETURNING id',
-            parameters: [fromId, toId, note, userId],
+            'INSERT INTO fh.transfers (from_warehouse_id, to_warehouse_id, note, created_by, is_sale) '
+            'VALUES (\$1, \$2, \$3, \$4, \$5) RETURNING id',
+            parameters: [fromId, toId, note, userId, isSale],
           );
           final transferId = tr.first[0];
 

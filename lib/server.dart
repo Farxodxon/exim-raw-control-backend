@@ -55,11 +55,13 @@ void main() async {
           to_warehouse_id INTEGER NOT NULL REFERENCES fh.warehouses(id),
           status VARCHAR(20) DEFAULT 'pending',
           note TEXT,
+          is_sale BOOLEAN DEFAULT false,
           created_by INTEGER REFERENCES fh.users(id),
           created_at TIMESTAMP DEFAULT NOW(),
           completed_at TIMESTAMP
         )
       ''');
+      await conn.execute("ALTER TABLE fh.transfers ADD COLUMN IF NOT EXISTS is_sale BOOLEAN DEFAULT false");
       await conn.execute('''
         CREATE TABLE IF NOT EXISTS fh.transfer_items (
           id SERIAL PRIMARY KEY,
