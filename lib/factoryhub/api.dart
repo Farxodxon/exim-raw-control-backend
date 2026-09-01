@@ -662,7 +662,9 @@ extension _FhRoutes on Router {
                  ) AS ref_key,
                  MAX(l.name_snapshot) AS name,
                  MAX(l.unit) AS unit,
-                 SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) AS balance
+                 SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) AS balance,
+                 MAX(l.ref_id) AS ref_id,
+                 MAX(l.ref_barcode) AS ref_barcode
           FROM fh.stock_ledger l
           LEFT JOIN public.raw_materials rm ON rm.id = l.ref_id
           WHERE l.warehouse_id = \$1
@@ -687,6 +689,7 @@ extension _FhRoutes on Router {
           'stock': stockResult.map((row) => {
             'itemType': row[0], 'refKey': row[1], 'name': row[2],
             'unit': row[3], 'balance': row[4]?.toString(),
+            'refId': row[5], 'refBarcode': row[6],
           }).toList(),
         });
       } catch (e) {
@@ -1260,7 +1263,7 @@ extension _FhRoutes on Router {
         }
       } catch (e) {
         print('transfers POST xato: $e');
-        return _json({'error': 'Server xatosi'}, status: 500);
+        return _json({'error': "Transfer bajarilmadi: $e"}, status: 500);
       }
     });
 

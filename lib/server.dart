@@ -19,6 +19,15 @@ void main() async {
     } catch (_) {}
     try {
       final conn = await DatabaseConnection.getConnection();
+      await conn.execute('SELECT 1 FROM fh.stock_ledger LIMIT 1');
+      await conn.execute("ALTER TABLE fh.stock_ledger ADD COLUMN IF NOT EXISTS source_type VARCHAR(50)");
+      await conn.execute("ALTER TABLE fh.stock_ledger ADD COLUMN IF NOT EXISTS source_ref TEXT");
+      await conn.execute("ALTER TABLE fh.stock_ledger ADD COLUMN IF NOT EXISTS performed_by INTEGER REFERENCES fh.users(id)");
+      await conn.execute("ALTER TABLE fh.stock_ledger ADD COLUMN IF NOT EXISTS note TEXT");
+      print('✅ fh.stock_ledger columns ensured');
+    } catch (_) {}
+    try {
+      final conn = await DatabaseConnection.getConnection();
       await conn.execute('''
         CREATE TABLE IF NOT EXISTS fh.product_warehouses (
           id SERIAL PRIMARY KEY,
