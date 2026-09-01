@@ -118,6 +118,35 @@ void main() async {
           qty NUMERIC NOT NULL CHECK (qty > 0)
         )
       ''');
+      await conn.execute('''
+        ALTER TABLE fh.warehouses ADD COLUMN IF NOT EXISTS can_analyze BOOLEAN DEFAULT true
+      ''');
+      await conn.execute('''
+        ALTER TABLE fh.warehouses ADD COLUMN IF NOT EXISTS can_transfer BOOLEAN DEFAULT false
+      ''');
+      await conn.execute('''
+        ALTER TABLE fh.warehouses ADD COLUMN IF NOT EXISTS can_income BOOLEAN DEFAULT true
+      ''');
+      await conn.execute('''
+        ALTER TABLE fh.warehouses ADD COLUMN IF NOT EXISTS can_expense BOOLEAN DEFAULT true
+      ''');
+      print('✅ fh.warehouses capability columns ensured');
+    } catch (_) {}
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS fh.warehouse_transfer_routes (
+          id SERIAL PRIMARY KEY,
+          from_warehouse_id INTEGER NOT NULL REFERENCES fh.warehouses(id) ON DELETE CASCADE,
+          to_warehouse_id INTEGER NOT NULL REFERENCES fh.warehouses(id) ON DELETE CASCADE,
+          created_at TIMESTAMP DEFAULT NOW(),
+          UNIQUE(from_warehouse_id, to_warehouse_id)
+        )
+      ''');
+      print('✅ fh.warehouse_transfer_routes ensured');
+    } catch (_) {}
+    try {
+      final conn = await DatabaseConnection.getConnection();
       print('✅ fh.boms + fh.bom_items ensured');
     } catch (_) {}
     try {

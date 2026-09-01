@@ -544,7 +544,8 @@ extension _FhRoutes on Router {
         var result;
         if (role == AppRoles.warehouseKeeper && userId != null) {
           result = await db.execute(
-            '''SELECT w.id, w.name, w.type, w.is_active, w.created_at
+            '''SELECT w.id, w.name, w.type, w.is_active, w.created_at,
+                     w.can_analyze, w.can_transfer, w.can_income, w.can_expense
                FROM fh.warehouses w
                JOIN fh.user_warehouses uw ON uw.warehouse_id = w.id
                WHERE uw.user_id = \$1
@@ -553,23 +554,33 @@ extension _FhRoutes on Router {
           );
         } else {
           result = await db.execute(
-            'SELECT id, name, type, is_active, created_at FROM fh.warehouses ORDER BY id',
+            'SELECT id, name, type, is_active, created_at, can_analyze, can_transfer, can_income, can_expense FROM fh.warehouses ORDER BY id',
           );
         }
 
         final warehouses = <Map<String, dynamic>>[];
         for (final row in result) {
+          final id = row[0];
           final countResult = await db.execute(
             "SELECT COUNT(DISTINCT COALESCE(ref_id::text, ref_barcode)) "
             'FROM fh.stock_ledger WHERE warehouse_id = \$1 AND direction IS NOT NULL',
-            parameters: [row[0]],
+            parameters: [id],
+          );
+          final routesResult = await db.execute(
+            'SELECT to_warehouse_id FROM fh.warehouse_transfer_routes WHERE from_warehouse_id = \$1',
+            parameters: [id],
           );
           warehouses.add({
-            'id': row[0],
+            'id': id,
             'name': row[1],
             'type': row[2],
             'isActive': row[3],
             'createdAt': row[4]?.toString(),
+            'canAnalyze': row[5] ?? true,
+            'canTransfer': row[6] ?? false,
+            'canIncome': row[7] ?? true,
+            'canExpense': row[8] ?? true,
+            'transferTo': routesResult.map((r) => r[0]).toList(),
             'itemCount': countResult.isNotEmpty ? countResult.first[0] : 0,
           });
         }
@@ -601,21 +612,147 @@ extension _FhRoutes on Router {
           return _json({'error': "type noto'g'ri"}, status: 400);
         }
 
+        final canAnalyze = body['canAnalyze'] as bool? ?? true;
+        final canTransfer = body['canTransfer'] as bool? ?? false;
+        final canIncome = body['canIncome'] as bool? ?? true;
+        final canExpense = body['canExpense'] as bool? ?? true;
+        final transferTo = (body['transferTo'] as List?)?.map((e) => int.tryParse('$e')).whereType<int>().toList() ?? <int>[];
+
         final db = await DatabaseConnection.getConnection();
+        await db.execute('BEGIN');
         final result = await db.execute(
-          'INSERT INTO fh.warehouses (name, type) VALUES (\$1, \$2) '
+          'INSERT INTO fh.warehouses (name, type, can_analyze, can_transfer, can_income, can_expense) '
+          'VALUES (\$1, \$2, \$3, \$4, \$5, \$6) '
           'RETURNING id, name, type, is_active, created_at',
-          parameters: [name.trim(), type],
+          parameters: [name.trim(), type, canAnalyze, canTransfer, canIncome, canExpense],
         );
         final row = result.first;
+        final newId = row[0];
+
+        if (canTransfer && transferTo.isNotEmpty) {
+          for (final toId in transferTo) {
+            if (toId != newId) {
+              await db.execute(
+                'INSERT INTO fh.warehouse_transfer_routes (from_warehouse_id, to_warehouse_id) '
+                'VALUES (\$1, \$2) ON CONFLICT DO NOTHING',
+                parameters: [newId, toId],
+              );
+            }
+          }
+        }
+        await db.execute('COMMIT');
+
         return _json({
           'message': 'Ombor yaratildi',
           'warehouse': {
-            'id': row[0], 'name': row[1], 'type': row[2], 'isActive': row[3]
+            'id': row[0], 'name': row[1], 'type': row[2], 'isActive': row[3],
+            'canAnalyze': canAnalyze, 'canTransfer': canTransfer,
+            'canIncome': canIncome, 'canExpense': canExpense,
+            'transferTo': transferTo,
           },
         }, status: 201);
       } catch (e) {
         print('warehouses POST xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    put('/warehouses/<id>', (Request request, String id) async {
+      if (!Policy.canControlWarehouses(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final warehouseId = int.tryParse(id);
+      if (warehouseId == null) {
+        return _json({'error': "Noto'g'ri ID"}, status: 400);
+      }
+      try {
+        final body = await _body(request);
+        final db = await DatabaseConnection.getConnection();
+
+        final exists = await db.execute(
+          'SELECT 1 FROM fh.warehouses WHERE id = \$1',
+          parameters: [warehouseId],
+        );
+        if (exists.isEmpty) {
+          return _json({'error': 'Topilmadi'}, status: 404);
+        }
+
+        final canAnalyze = body['canAnalyze'] as bool? ?? true;
+        final canTransfer = body['canTransfer'] as bool? ?? false;
+        final canIncome = body['canIncome'] as bool? ?? true;
+        final canExpense = body['canExpense'] as bool? ?? true;
+        final transferTo = (body['transferTo'] as List?)
+                ?.map((e) => int.tryParse('$e'))
+                .whereType<int>()
+                .where((t) => t != warehouseId)
+                .toList() ??
+            <int>[];
+
+        await db.execute('BEGIN');
+        await db.execute(
+          'UPDATE fh.warehouses SET can_analyze = \$1, can_transfer = \$2, '
+          'can_income = \$3, can_expense = \$4 WHERE id = \$5',
+          parameters: [canAnalyze, canTransfer, canIncome, canExpense, warehouseId],
+        );
+        await db.execute(
+          'DELETE FROM fh.warehouse_transfer_routes WHERE from_warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
+        if (canTransfer && transferTo.isNotEmpty) {
+          for (final toId in transferTo) {
+            final toExists = await db.execute(
+              'SELECT 1 FROM fh.warehouses WHERE id = \$1',
+              parameters: [toId],
+            );
+            if (toExists.isNotEmpty) {
+              await db.execute(
+                'INSERT INTO fh.warehouse_transfer_routes (from_warehouse_id, to_warehouse_id) '
+                'VALUES (\$1, \$2) ON CONFLICT DO NOTHING',
+                parameters: [warehouseId, toId],
+              );
+            }
+          }
+        }
+        await db.execute('COMMIT');
+
+        return _json({
+          'message': 'Ombor yangilandi',
+          'warehouse': {
+            'id': warehouseId,
+            'canAnalyze': canAnalyze, 'canTransfer': canTransfer,
+            'canIncome': canIncome, 'canExpense': canExpense,
+            'transferTo': transferTo,
+          },
+        });
+      } catch (e) {
+        print('warehouses PUT xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    delete('/warehouses', (Request request) async {
+      if (!Policy.canControlWarehouses(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final db = await DatabaseConnection.getConnection();
+        await db.execute('BEGIN');
+        await db.execute('DELETE FROM fh.warehouse_transfer_routes');
+        await db.execute('DELETE FROM fh.stock_writes');
+        await db.execute('DELETE FROM fh.transfer_items');
+        await db.execute('DELETE FROM fh.transfers');
+        await db.execute('DELETE FROM fh.production_batches');
+        await db.execute('DELETE FROM fh.stock_ledger');
+        await db.execute('DELETE FROM fh.product_warehouses');
+        await db.execute('DELETE FROM fh.user_warehouses');
+        final count = await db.execute('DELETE FROM fh.warehouses RETURNING id');
+        await db.execute('COMMIT');
+        return _json({
+          'message': 'Barcha omborlar o\'chirildi',
+          'deleted': count.length,
+        });
+      } catch (e) {
+        print('warehouses DELETE xato: $e');
         return _json({'error': 'Server xatosi'}, status: 500);
       }
     });
@@ -646,13 +783,19 @@ extension _FhRoutes on Router {
         }
 
         final infoResult = await db.execute(
-          'SELECT name, type, is_active, created_at FROM fh.warehouses WHERE id = \$1',
+          'SELECT name, type, is_active, created_at, can_analyze, can_transfer, can_income, can_expense '
+          'FROM fh.warehouses WHERE id = \$1',
           parameters: [warehouseId],
         );
         if (infoResult.isEmpty) {
           return _json({'error': 'Topilmadi'}, status: 404);
         }
         final info = infoResult.first;
+
+        final routesResult = await db.execute(
+          'SELECT to_warehouse_id FROM fh.warehouse_transfer_routes WHERE from_warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
 
         final stockResult = await db.execute(
           '''
@@ -692,6 +835,11 @@ extension _FhRoutes on Router {
             'type': info[1],
             'isActive': info[2],
             'createdAt': info[3]?.toString(),
+            'canAnalyze': info[4] ?? true,
+            'canTransfer': info[5] ?? false,
+            'canIncome': info[6] ?? true,
+            'canExpense': info[7] ?? true,
+            'transferTo': routesResult.map((r) => r[0]).toList(),
           },
           'stock': stockResult.map((row) => {
             'itemType': row[0], 'refKey': row[1], 'name': row[2],
@@ -817,7 +965,7 @@ extension _FhRoutes on Router {
         final db = await DatabaseConnection.getConnection();
 
         final whRow = await db.execute(
-          'SELECT id, type FROM fh.warehouses WHERE id = \$1 AND is_active',
+          'SELECT id, type, can_income, can_expense FROM fh.warehouses WHERE id = \$1 AND is_active',
           parameters: [warehouseId],
         );
         if (whRow.isEmpty) {
@@ -825,47 +973,17 @@ extension _FhRoutes on Router {
         }
         final whType = whRow.first[1] as String?;
 
-        // ── Qat'iy oqim nazorati (qo'lda kirim/chiqim) ──
-        // 1) Xom ashyo ombori: faqat qo'lda KIRIM ruxsat (yangi xom kelganda),
-        //    chiqim faqat ishlab chiqarish orqali.
-        if (whType == 'raw' && direction == 'out') {
+        // ── Imkoniyatga asoslangan oqim nazorati (qo'lda kirim/chiqim) ──
+        final canIncome = whRow.first[2] == true;
+        final canExpense = whRow.first[3] == true;
+        if (direction == 'in' && !canIncome) {
           return _json({
-            'error': 'Xom ashyo omboridan qo\'lda chiqim taqiqlangan. Chegirma ishlab chiqarish orqali amalga oshiriladi',
+            'error': 'Bu ombor uchun qo\'lda kirim imkoniyati yoqilmagan',
           }, status: 403);
         }
-        // 2) Tayyor mahsulot ombori: qo'lda kirim ham, chiqim ham taqiq.
-        //    Kirish faqat ishlab chiqarish (production_in) yoki transfer bilan.
-        if (whType == 'finished') {
+        if (direction == 'out' && !canExpense) {
           return _json({
-            'error': 'Tayyor mahsulot omborida qo\'lda kirim/chiqim taqiqlangan. Kirish ishlab chiqarish va transfer orqali',
-          }, status: 403);
-        }
-        // 3) Sotuv ombori: qo'lda kirim taqiq (faqat transfer kiradi), chiqim = sotuv ruxsat.
-        if (whType == 'sales' && direction == 'in') {
-          return _json({
-            'error': 'Sotuv omboriga qo\'lda kirim taqiqlangan. Mahsulot transfer orqali kiradi',
-          }, status: 403);
-        }
-        // 4) Diler ombori: qo'lda kirim ham, chiqim ham taqiq.
-        //    Diler omboriga transfer = mahsulot SOTILDI (oxirgi bosqich).
-        if (whType == 'dealer') {
-          return _json({
-            'error': 'Diler omborida qo\'lda amallar taqiqlangan. Diler omboriga transfer = sotuv (oxirgi bosqich)',
-          }, status: 403);
-        }
-        // 5) Ishlab chiqarish ombori (WIP): qo'lda kirim/chiqim taqiq.
-        //    Materiallar faqat production_out (xom → ishlab chiqarish) va
-        //    production_in (tayyor → ishlab chiqarish) orqali kiradi/chiqadi.
-        if (whType == 'production') {
-          return _json({
-            'error': 'Ishlab chiqarish omborida qo\'lda amallar taqiqlangan. Materiallar ishlab chiqarish jarayoni orqali o\'tadi',
-          }, status: 403);
-        }
-        // 6) Qadoqlash materiallari ombori: qo'lda kirim ruxsat (sotib olinganda),
-        //    chiqim faqat qadoqlash jarayoni orqali.
-        if (whType == 'packaging' && direction == 'out') {
-          return _json({
-            'error': 'Qadoqlash materiallari omboridan qo\'lda chiqim taqiqlangan. Chiqim qadoqlash jarayoni orqali',
+            'error': 'Bu ombor uchun qo\'lda chiqim imkoniyati yoqilmagan. Mahsulot faqat ishlab chiqarish yoki transfer orqali chiqadi',
           }, status: 403);
         }
 
@@ -1266,35 +1384,37 @@ extension _FhRoutes on Router {
         final userId = _uid(request);
         final db = await DatabaseConnection.getConnection();
 
-        // ── Qat'iy oqim nazorati (transfer) ──
+        // ── Imkoniyatga asoslangan oqim nazorati (transfer) ──
         final whTypesRow = await db.execute(
-          'SELECT id, type FROM fh.warehouses WHERE id IN (\$1, \$2)',
+          'SELECT id, type, can_transfer FROM fh.warehouses WHERE id IN (\$1, \$2)',
           parameters: [fromId, toId],
         );
         final Map<int, String?> whTypes = {
           for (final r in whTypesRow) r[0] as int: r[1] as String?,
+        };
+        final Map<int, bool> whCanTransfer = {
+          for (final r in whTypesRow) r[0] as int: (r[2] ?? false) == true,
         };
         final fromType = whTypes[fromId];
         final toType = whTypes[toId];
         if (fromType == null || toType == null) {
           return _json({'error': 'Ombor topilmadi'}, status: 404);
         }
-        // Diler ombori oxirgi bosqich — undan chiqish taqiq.
-        if (fromType == 'dealer') {
+        // Jo'natuvchi ombor uchun transfer imkoniyati yoqilgan bo'lishi kerak.
+        if (!(whCanTransfer[fromId] ?? false)) {
           return _json({
-            'error': 'Diler ombori oxirgi bosqich — undan transfer qilish mumkin emas',
+            'error': 'Bu ombor uchun transfer imkoniyati yoqilmagan',
           }, status: 403);
         }
-        // Xom ashyo omboridan chiqish faqat ishlab chiqarish orqali (transfer emas).
-        if (fromType == 'raw') {
+        // Ruxsat etilgan yo'nalish (warehouse_transfer_routes) mavjud bo'lishi shart.
+        final route = await db.execute(
+          'SELECT 1 FROM fh.warehouse_transfer_routes '
+          'WHERE from_warehouse_id = \$1 AND to_warehouse_id = \$2',
+          parameters: [fromId, toId],
+        );
+        if (route.isEmpty) {
           return _json({
-            'error': 'Xom ashyo omboridan transfer taqiqlangan. Xom ashyo ishlab chiqarishga sarflanadi',
-          }, status: 403);
-        }
-        // Xom ashyo omboriga transfer (kirim) ham ruxsat emas — faqat qo'lda kirim.
-        if (toType == 'raw') {
-          return _json({
-            'error': 'Xom ashyo omboriga transfer bilan kirim taqiqlangan. Kirim qo\'lda amalga oshiriladi',
+            'error': 'Bu yo\'nalishga transfer ruxsat etilmagan. Ombor sozlamalarida transfer yo\'nalishini qo\'shing',
           }, status: 403);
         }
         final bool isSale = toType == 'dealer';
