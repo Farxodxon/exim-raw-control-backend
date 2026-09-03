@@ -29,6 +29,12 @@ void main() async {
         ALTER TABLE fh.stock_ledger ADD CONSTRAINT stock_ledger_source_type_check
         CHECK (source_type IN ('manual', 'production_out', 'production_in', 'transfer_out', 'transfer_in'))
       """);
+      // stock_ledger item_type constraint: 'item' qiymatini qo'shish (fh.items katalogi uchun)
+      await conn.execute("ALTER TABLE fh.stock_ledger DROP CONSTRAINT IF EXISTS stock_ledger_item_type_check");
+      await conn.execute("""
+        ALTER TABLE fh.stock_ledger ADD CONSTRAINT stock_ledger_item_type_check
+        CHECK (item_type IN ('raw_material', 'product', 'spare_part', 'semi_finished', 'item'))
+      """);
       print('✅ fh.stock_ledger columns ensured');
     } catch (_) {}
     try {

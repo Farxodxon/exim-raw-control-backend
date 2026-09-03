@@ -1961,7 +1961,6 @@ extension _FhRoutes on Router {
               SELECT COALESCE(SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END), 0)
               FROM fh.stock_ledger
               WHERE warehouse_id = \$1 AND item_type = 'raw_material' AND ref_id = \$2
-              FOR UPDATE
               ''',
               parameters: [rawWarehouseId, rawId],
             );
@@ -2400,7 +2399,6 @@ extension _FhRoutes on Router {
               WHERE warehouse_id = \$1 AND item_type = \$2
                 AND (\$3::int IS NULL OR ref_id = \$3)
                 AND (\$4::text IS NULL OR ref_barcode = \$4)
-              FOR UPDATE
               ''',
               parameters: [sourceWarehouseId, itemType, refId, refBarcode],
             );
@@ -2521,7 +2519,6 @@ extension _FhRoutes on Router {
           WHERE warehouse_id = \$1 AND item_type = \$2
             AND (\$3::int IS NULL OR ref_id = \$3)
             AND (\$4::text IS NULL OR ref_barcode = \$4)
-          FOR UPDATE
           ''',
           parameters: [warehouseId, itemType, refId, refBarcode],
         );
