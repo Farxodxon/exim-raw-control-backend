@@ -2113,16 +2113,27 @@ extension _FhRoutes on Router {
           parameters: [bomId],
         );
         if (bom.isEmpty) return _json({'error': 'Retsept topilmadi'}, status: 404);
+        final r = bom.first;
+        // chiqadigan mahsulot haqida ma'lumot
+        dynamic outputItem = null;
+        final outItemId = r[3] as int?;
+        if (outItemId != null) {
+          final oi = await db.execute(
+            'SELECT id, name, unit FROM fh.items WHERE id = \$1', parameters: [outItemId]);
+          if (oi.isNotEmpty) {
+            outputItem = {'id': oi.first[0], 'name': oi.first[1], 'unit': oi.first[2]};
+          }
+        }
         final items = await db.execute(
           'SELECT item_type, ref_id, ref_barcode, name_snapshot, unit, qty FROM fh.bom_items WHERE bom_id = \$1 ORDER BY id',
           parameters: [bomId],
         );
-        final r = bom.first;
         return _json({
           'bom': {
             'id': r[0], 'name': r[1], 'stage': r[2], 'outputItemId': r[3],
             'outputQty': r[4]?.toString(), 'outputUnit': r[5],
           },
+          'outputItem': outputItem,
           'items': items.map((i) => {
             'itemType': i[0], 'refId': i[1], 'refBarcode': i[2],
             'name': i[3], 'unit': i[4], 'qty': i[5]?.toString(),
@@ -2155,6 +2166,33 @@ extension _FhRoutes on Router {
           }, status: 400);
         }
         final db = await DatabaseConnection.getConnection();
+
+        // output_item_id mavjudligini va stage bilan mosligini tekshirish
+        final outItem = await db.execute(
+          'SELECT name, item_type FROM fh.items WHERE id = \$1 AND is_active',
+          parameters: [outputItemId],
+        );
+        if (outItem.isEmpty) {
+          return _json({'error': 'Chiqadigan mahsulot (item) topilmadi. Avval items katalogida yarating.'}, status: 400);
+        }
+        final outItemType = outItem.first[1] as String;
+        final outItemName = outItem.first[0] as String;
+
+        // mixing → yarim tayyor/xom item; packaging → tayyor mahsulot itemi kerak
+        bool typeMatchesStage = false;
+        if (stage == 'mixing' &&
+            (outItemType == 'semi_finished' || outItemType == 'intermediate' || outItemType == 'semi' || outItemType == 'raw' || outItemType == 'material')) {
+          typeMatchesStage = true;
+        } else if (stage == 'packaging' &&
+            (outItemType == 'product' || outItemType == 'finished' || outItemType == 'item')) {
+          typeMatchesStage = true;
+        }
+        if (!typeMatchesStage) {
+          return _json({
+            'error': "'$outItemName' item turi '${outItemType}' BOM bosqichiga '${stage}' mos kelmaydi. Aralashtirish bosqichi uchun yarim tayyor, qadoqlash uchun tayyor mahsulot itemini tanlang."
+          }, status: 400);
+        }
+
         await db.execute('BEGIN');
         try {
           final bomResult = await db.execute(
@@ -2185,7 +2223,7 @@ extension _FhRoutes on Router {
         }
       } catch (e) {
         print('boms POST xato: $e');
-        return _json({'error': 'Server xatosi'}, status: 500);
+        return _json({'error': 'Retsept yaratishda xatolik yuz berdi'}, status: 500);
       }
     });
 
@@ -2200,28 +2238,47 @@ extension _FhRoutes on Router {
         final active = body['is_active'] as bool?;
         final name = body['name'] as String?;
         final outputQty = (body['output_qty'] as num?)?.toDouble();
+        final outputItemId = body['output_item_id'] as int?;
+        final outputUnit = body['output_unit'] as String?;
         if (active != null) {
           final db = await DatabaseConnection.getConnection();
           await db.execute('UPDATE fh.boms SET is_active = \$1 WHERE id = \$2',
             parameters: [active, bomId]);
           return _json({'message': 'Yangilandi'});
         }
-        if (name != null || outputQty != null) {
+        if (name != null || outputQty != null || outputItemId != null || outputUnit != null) {
           final db = await DatabaseConnection.getConnection();
           if (name != null) {
             await db.execute('UPDATE fh.boms SET name = \$1 WHERE id = \$2',
-              parameters: [name, bomId]);
+              parameters: [name.trim(), bomId]);
           }
           if (outputQty != null) {
+            if (outputQty <= 0) {
+              return _json({'error': 'Chiqadigan miqdor 0 dan katta bo\'lishi kerak'}, status: 400);
+            }
             await db.execute('UPDATE fh.boms SET output_qty_per_batch = \$1 WHERE id = \$2',
               parameters: [outputQty, bomId]);
+          }
+          if (outputItemId != null) {
+            // output_item_id mavjudligini tekshirish
+            final oi = await db.execute(
+              'SELECT id FROM fh.items WHERE id = \$1 AND is_active', parameters: [outputItemId]);
+            if (oi.isEmpty) {
+              return _json({'error': 'Chiqadigan mahsulot (item) topilmadi'}, status: 400);
+            }
+            await db.execute('UPDATE fh.boms SET output_item_id = \$1 WHERE id = \$2',
+              parameters: [outputItemId, bomId]);
+          }
+          if (outputUnit != null && outputUnit.isNotEmpty) {
+            await db.execute('UPDATE fh.boms SET output_unit = \$1 WHERE id = \$2',
+              parameters: [outputUnit, bomId]);
           }
           return _json({'message': 'Yangilandi'});
         }
         return _json({'error': 'Yangilanadigan maydon topilmadi'}, status: 400);
       } catch (e) {
         print('boms/<id> PUT xato: $e');
-        return _json({'error': 'Server xatosi'}, status: 500);
+        return _json({'error': 'Retseptni yangilashda xatolik yuz berdi'}, status: 500);
       }
     });
 
@@ -2272,6 +2329,50 @@ extension _FhRoutes on Router {
         final outName = outItem.first[0] as String;
         final outUnit = outItem.first[1] as String? ?? outputUnit;
 
+        // ── Ombor turlarini tekshirish ──
+        final srcWh = await db.execute(
+          'SELECT name, type, can_expense FROM fh.warehouses WHERE id = \$1 AND is_active',
+          parameters: [sourceWarehouseId],
+        );
+        if (srcWh.isEmpty) return _json({'error': 'Manba ombor topilmadi yoki faol emas'}, status: 404);
+        final srcWhName = srcWh.first[0] as String;
+        final srcWhType = srcWh.first[1] as String;
+        final srcCanExpense = srcWh.first[2] as bool? ?? false;
+
+        final dstWh = await db.execute(
+          'SELECT name, type, can_income FROM fh.warehouses WHERE id = \$1 AND is_active',
+          parameters: [destWarehouseId],
+        );
+        if (dstWh.isEmpty) return _json({'error': 'Qabul qiluvchi ombor topilmadi yoki faol emas'}, status: 404);
+        final dstWhName = dstWh.first[0] as String;
+        final dstWhType = dstWh.first[1] as String;
+        final dstCanIncome = dstWh.first[2] as bool? ?? false;
+
+        // BOM bosqichiga mos ombor turlarini tekshirish
+        if (stage == 'mixing') {
+          const validSrcTypes = ['raw', 'purchased_semi', 'spare_parts', 'production'];
+          if (!validSrcTypes.contains(srcWhType)) {
+            return _json({'error': "Aralashtirish bosqichi uchun manba ombor turi '$srcWhType' ga mos kelmaydi. Kerakli turlar: xom ashyo, sotib olingan yarim tayyor, yoki ishlab chiqarish"}, status: 400);
+          }
+          const validDstTypes = ['semi_finished', 'production'];
+          if (!validDstTypes.contains(dstWhType)) {
+            return _json({'error': "Aralashtirish bosqichi uchun qabul qiluvchi ombor turi '$dstWhType' ga mos kelmaydi. Kerakli turlar: yarim tayyor yoki ishlab chiqarish"}, status: 400);
+          }
+        } else if (stage == 'packaging') {
+          const validDstTypes = ['finished', 'sales'];
+          if (!validDstTypes.contains(dstWhType)) {
+            return _json({'error': "Qadoqlash bosqichi uchun qabul qiluvchi ombor turi '$dstWhType' ga mos kelmaydi. Kerakli turlar: tayyor mahsulot yoki sotuv"}, status: 400);
+          }
+        }
+
+        // Ombor imkoniyatlarini tekshirish
+        if (!srcCanExpense) {
+          return _json({'error': "'$srcWhName' omborida chiqim imkoniyati yoqilmagan"}, status: 400);
+        }
+        if (!dstCanIncome) {
+          return _json({'error': "'$dstWhName' omborida kirim imkoniyati yoqilmagan"}, status: 400);
+        }
+
         final bomItems = await db.execute(
           'SELECT item_type, ref_id, ref_barcode, name_snapshot, unit, qty FROM fh.bom_items WHERE bom_id = \$1 ORDER BY id',
           parameters: [bomId],
@@ -2308,6 +2409,9 @@ extension _FhRoutes on Router {
               await db.execute('ROLLBACK');
               return _json({
                 'error': "Yetarli emas: $nameSnapshot — kerak ${needQty.toStringAsFixed(3)} $unit, mavjud ${balance.toStringAsFixed(3)}",
+                'shortages': [
+                  {'name': nameSnapshot, 'needed': needQty, 'available': balance, 'unit': unit}
+                ],
               }, status: 409);
             }
             await db.execute(
@@ -2361,9 +2465,10 @@ extension _FhRoutes on Router {
             'message': 'Ishlab chiqarish bajarildi',
             'batchId': batchId,
             'stage': stage,
-            'output': outName,
+            'outputItemName': outName,
             'outputQty': totalOutQty,
             'outputUnit': outUnit,
+            'destWarehouseName': dstWhName,
           }, status: 201);
         } catch (_) {
           await db.execute('ROLLBACK');
@@ -2371,7 +2476,7 @@ extension _FhRoutes on Router {
         }
       } catch (e) {
         print('production/bom/start xato: $e');
-        return _json({'error': 'Server xatosi: $e'}, status: 500);
+        return _json({'error': 'Ishlab chiqarish boshlashda xatolik yuz berdi. Qayta urinib ko\'ring'}, status: 500);
       }
     });
 
@@ -2495,7 +2600,7 @@ extension _FhRoutes on Router {
         final db = await DatabaseConnection.getConnection();
 
         final batchResult = await db.execute(
-          'SELECT product_barcode, status FROM fh.production_batches WHERE id = \$1',
+          'SELECT product_barcode, status, bom_id, stage FROM fh.production_batches WHERE id = \$1',
           parameters: [batchId],
         );
         if (batchResult.isEmpty) {
@@ -2510,66 +2615,174 @@ extension _FhRoutes on Router {
         }
 
         final barcode = batch[0] as String;
+        final bomId = batch[2] as int?;
 
         await db.execute('BEGIN');
         try {
           if (action == 'complete') {
-            final product = await db.execute(
-              'SELECT name FROM public.products WHERE barcode = \$1',
-              parameters: [barcode],
-            );
-            final productName =
-                product.isNotEmpty ? product.first[0] as String : barcode;
+            if (bomId != null) {
+              // BOM-based production: use output_item_id from BOM
+              final bomRow = await db.execute(
+                'SELECT output_item_id, output_qty_per_batch, output_unit FROM fh.boms WHERE id = \$1',
+                parameters: [bomId],
+              );
+              if (bomRow.isEmpty) {
+                await db.execute('ROLLBACK');
+                return _json({'error': 'Retsept topilmadi'}, status: 404);
+              }
+              final outputItemId = bomRow.first[0] as int?;
+              final outputUnit = bomRow.first[2] as String? ?? 'dona';
 
-            await db.execute(
-              '''
-              INSERT INTO fh.stock_ledger
-                (warehouse_id, item_type, ref_barcode, name_snapshot, unit,
-                 direction, qty, source_type, source_ref, performed_by)
-              VALUES (\$1, 'product', \$2, \$3, 'dona', 'in', \$4, 'production_in', \$5, \$6)
-              ''',
-              parameters: [
-                finishedWarehouseId, barcode, productName,
-                producedQty!.toDouble(), batchId.toString(), _uid(request),
-              ],
-            );
+              final outItem = await db.execute(
+                'SELECT name FROM fh.items WHERE id = \$1',
+                parameters: [outputItemId],
+              );
+              final outName = outItem.isNotEmpty ? outItem.first[0] as String : 'Mahsulot';
 
-            await db.execute(
-              '''
-              UPDATE fh.production_batches
-              SET status = 'completed', produced_qty = \$2, completed_at = now()
-              WHERE id = \$1
-              ''',
-              parameters: [batchId, producedQty],
-            );
+              // Get dest warehouse name
+              final destWh = await db.execute(
+                'SELECT name FROM fh.warehouses WHERE id = \$1',
+                parameters: [finishedWarehouseId],
+              );
+              final destWhName = destWh.isNotEmpty ? destWh.first[0] as String : 'Ombor';
 
-            await db.execute(
-              '''
-              UPDATE fh.plans p SET produced_qty = p.produced_qty + \$2,
-                     status = CASE WHEN p.produced_qty + \$2 >= p.target_qty THEN 'done' ELSE 'in_progress' END
-              WHERE p.id = (SELECT plan_id FROM fh.production_batches WHERE id = \$1 AND plan_id IS NOT NULL)
-              ''',
-              parameters: [batchId, producedQty],
-            );
+              await db.execute(
+                '''
+                INSERT INTO fh.stock_ledger
+                  (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+                   direction, qty, source_type, source_ref, performed_by)
+                VALUES (\$1, 'item', \$2, NULL, \$3, \$4, 'in', \$5, 'production_in', \$6, \$7)
+                ''',
+                parameters: [
+                  finishedWarehouseId, outputItemId, outName, outputUnit,
+                  producedQty!.toDouble(), batchId.toString(), _uid(request),
+                ],
+              );
+
+              await db.execute(
+                '''
+                UPDATE fh.production_batches
+                SET status = 'completed', produced_qty = \$2, completed_at = now()
+                WHERE id = \$1
+                ''',
+                parameters: [batchId, producedQty],
+              );
+
+              await db.execute(
+                '''
+                UPDATE fh.plans p SET produced_qty = p.produced_qty + \$2,
+                       status = CASE WHEN p.produced_qty + \$2 >= p.target_qty THEN 'done' ELSE 'in_progress' END
+                WHERE p.id = (SELECT plan_id FROM fh.production_batches WHERE id = \$1 AND plan_id IS NOT NULL)
+                ''',
+                parameters: [batchId, producedQty],
+              );
+
+              await db.execute('COMMIT');
+              return _json({
+                'message': 'Yakunlandi',
+                'outputItemName': outName,
+                'outputQty': producedQty,
+                'outputUnit': outputUnit,
+                'destWarehouseName': destWhName,
+              });
+            } else {
+              // Legacy production: use public.products
+              final product = await db.execute(
+                'SELECT name FROM public.products WHERE barcode = \$1',
+                parameters: [barcode],
+              );
+              final productName =
+                  product.isNotEmpty ? product.first[0] as String : barcode;
+
+              await db.execute(
+                '''
+                INSERT INTO fh.stock_ledger
+                  (warehouse_id, item_type, ref_barcode, name_snapshot, unit,
+                   direction, qty, source_type, source_ref, performed_by)
+                VALUES (\$1, 'product', \$2, \$3, 'dona', 'in', \$4, 'production_in', \$5, \$6)
+                ''',
+                parameters: [
+                  finishedWarehouseId, barcode, productName,
+                  producedQty!.toDouble(), batchId.toString(), _uid(request),
+                ],
+              );
+
+              await db.execute(
+                '''
+                UPDATE fh.production_batches
+                SET status = 'completed', produced_qty = \$2, completed_at = now()
+                WHERE id = \$1
+                ''',
+                parameters: [batchId, producedQty],
+              );
+
+              await db.execute(
+                '''
+                UPDATE fh.plans p SET produced_qty = p.produced_qty + \$2,
+                       status = CASE WHEN p.produced_qty + \$2 >= p.target_qty THEN 'done' ELSE 'in_progress' END
+                WHERE p.id = (SELECT plan_id FROM fh.production_batches WHERE id = \$1 AND plan_id IS NOT NULL)
+                ''',
+                parameters: [batchId, producedQty],
+              );
+
+              await db.execute('COMMIT');
+              return _json({'message': 'Yakunlandi'});
+            }
           } else {
+            // Cancel: reversal for BOM-based batches
+            if (bomId != null) {
+              // Reverse stock_ledger entries for this batch
+              final ledgerEntries = await db.execute(
+                '''SELECT id, warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit, direction, qty, source_type
+                   FROM fh.stock_ledger WHERE source_ref = \$1''',
+                parameters: [batchId.toString()],
+              );
+              for (final entry in ledgerEntries) {
+                final entryWarehouseId = entry[1];
+                final entryItemType = entry[2];
+                final entryRefId = entry[3];
+                final entryRefBarcode = entry[4];
+                final entryNameSnapshot = entry[5];
+                final entryUnit = entry[6];
+                final entryDirection = entry[7];
+                final entryQty = entry[8];
+                final entrySourceType = entry[9];
+                // Create reversal entry
+                final reversalDirection = entryDirection == 'in' ? 'out' : 'in';
+                final reversalSourceType = entrySourceType == 'production_in' ? 'production_out' : 'production_in';
+                await db.execute(
+                  '''
+                  INSERT INTO fh.stock_ledger
+                    (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+                     direction, qty, source_type, source_ref, performed_by, note)
+                  VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$8, \$9, \$10, \$11)
+                  ''',
+                  parameters: [
+                    entryWarehouseId, entryItemType, entryRefId, entryRefBarcode,
+                    entryNameSnapshot, entryUnit, reversalDirection, entryQty,
+                    reversalSourceType, batchId.toString(), _uid(request),
+                    'Bekor qilish — reversal #$batchId',
+                  ],
+                );
+              }
+            }
+
             await db.execute(
               "UPDATE fh.production_batches SET status = 'cancelled', completed_at = now() "
               'WHERE id = \$1',
               parameters: [batchId],
             );
-          }
 
-          await db.execute('COMMIT');
-          return _json({
-            'message': action == 'complete' ? 'Yakunlandi' : 'Bekor qilindi'
-          });
+            await db.execute('COMMIT');
+            return _json({'message': 'Bekor qilindi'});
+          }
         } catch (_) {
           await db.execute('ROLLBACK');
           rethrow;
         }
       } catch (e) {
         print('production/:id xato: $e');
-        return _json({'error': 'Server xatosi'}, status: 500);
+        return _json({'error': 'Partiya holatini yangilashda xatolik. Qayta urinib ko\'ring'}, status: 500);
       }
     });
 
