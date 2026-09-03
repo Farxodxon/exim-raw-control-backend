@@ -653,7 +653,7 @@ extension _FhRoutes on Router {
         }, status: 201);
       } catch (e) {
         print('warehouses POST xato: $e');
-        return _json({'error': 'Server xatosi'}, status: 500);
+        return _json({'error': 'Server xatosi: $e'}, status: 500);
       }
     });
 

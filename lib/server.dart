@@ -118,6 +118,10 @@ void main() async {
           qty NUMERIC NOT NULL CHECK (qty > 0)
         )
       ''');
+      print('✅ fh.boms + fh.bom_items ensured');
+    } catch (e) { print('⚠️ fh.boms error: $e'); }
+    try {
+      final conn = await DatabaseConnection.getConnection();
       await conn.execute('''
         ALTER TABLE fh.warehouses ADD COLUMN IF NOT EXISTS can_analyze BOOLEAN DEFAULT true
       ''');
@@ -131,7 +135,7 @@ void main() async {
         ALTER TABLE fh.warehouses ADD COLUMN IF NOT EXISTS can_expense BOOLEAN DEFAULT true
       ''');
       print('✅ fh.warehouses capability columns ensured');
-    } catch (_) {}
+    } catch (e) { print('⚠️ fh.warehouses capability columns error: $e'); }
     try {
       final conn = await DatabaseConnection.getConnection();
       await conn.execute('''
@@ -144,11 +148,7 @@ void main() async {
         )
       ''');
       print('✅ fh.warehouse_transfer_routes ensured');
-    } catch (_) {}
-    try {
-      final conn = await DatabaseConnection.getConnection();
-      print('✅ fh.boms + fh.bom_items ensured');
-    } catch (_) {}
+    } catch (e) { print('⚠️ fh.warehouse_transfer_routes error: $e'); }
     try {
       final conn = await DatabaseConnection.getConnection();
       await conn.execute('''
