@@ -2,10 +2,12 @@
 import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
+import 'package:postgres/postgres.dart';
 import 'package:exim_raw_backend/database/connection.dart';
 import 'package:exim_raw_backend/factoryhub/jwt.dart';
 import 'package:exim_raw_backend/factoryhub/policy.dart';
 import 'package:exim_raw_backend/factoryhub/user_storage.dart';
+import 'package:exim_raw_backend/factoryhub/hr_models.dart';
 import 'package:excel/excel.dart';
 
 final Router _router = Router().._registerRoutes();
@@ -83,13 +85,23 @@ Middleware _authMiddleware = (innerHandler) {
 
     final authHeader =
         request.headers['Authorization'] ?? request.headers['authorization'];
-    final payload = FhJwt.getUserFromToken(authHeader);
+final payload = FhJwt.getUserFromToken(authHeader);
 
     if (payload == null) {
       return _json(
         {'error': 'Avtorizatsiya talab qilinadi. Iltimos, qayta kiring.'},
         status: 401,
       );
+    }
+
+    final role = payload['role'] as String? ?? '';
+    if (role == AppRoles.hrManager) {
+      final isHrPath = path.startsWith('hr/');
+      final isAllowed =
+          isHrPath || path == 'dashboard/summary' || path == 'alerts';
+      if (!isAllowed) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
     }
 
     return innerHandler(request.change(context: {'fh_user': payload}));
@@ -601,8 +613,10 @@ extension _FhRoutes on Router {
         final name = body['name'] as String?;
         final type = body['type'] as String?;
         final allowedTypes = [
-          'raw', 'finished', 'spare_parts', 'semi_finished', 'sales', 'dealer',
-          'production', 'packaging', 'purchased_finished', 'purchased_semi'
+          'raw', 'production', 'semi_finished', 'packaging', 'finished',
+          'purchased_finished', 'purchased_semi', 'spare_parts', 'sales', 'dealer',
+          'quarantine', 'defective', 'returned', 'retain_sample',
+          'empty_container', 'other'
         ];
 
         if (name == null || name.trim().isEmpty || type == null) {
@@ -968,6 +982,7 @@ extension _FhRoutes on Router {
         final direction = body['direction'] as String?;
         final qty = (body['qty'] as num?)?.toDouble();
         final note = body['note'] as String?;
+        final isRegime51 = body['is_regime_51'] as bool? ?? false;
 
         final allowedTypes = ['raw_material', 'product', 'spare_part', 'semi_finished', 'item'];
         if (warehouseId == null || itemType == null || direction == null || qty == null) {
@@ -1085,12 +1100,12 @@ extension _FhRoutes on Router {
           '''
           INSERT INTO fh.stock_ledger
             (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
-             direction, qty, source_type, performed_by, note)
-          VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, 'manual', \$9, \$10)
+             direction, qty, source_type, performed_by, note, is_regime_51)
+          VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, 'manual', \$9, \$10, \$11)
           ''',
           parameters: [
             warehouseId, itemType, refId, refBarcode, nameSnapshot, unit,
-            direction, qty, userId, note,
+            direction, qty, userId, note, isRegime51,
           ],
         );
 
@@ -1617,6 +1632,85 @@ extension _FhRoutes on Router {
       }
     });
 
+    // ---------- 51-REJIM BALANS HISOBOTI ----------
+    // Faqat is_regime_51 = true bo'lgan yozuvlar bo'yicha SUM(in)-SUM(out).
+    // Umumiy balansga ta'sir qilmaydi (umumiy SUM hech qachon bu flagga qaramaydi).
+    get('/reports/regime51-balance', (Request request) async {
+      try {
+        final warehouseId = int.tryParse(request.url.queryParameters['warehouse_id'] ?? '');
+        final itemId = int.tryParse(request.url.queryParameters['item_id'] ?? '');
+
+        final db = await DatabaseConnection.getConnection();
+
+        var where = 'l.is_regime_51 = true';
+        final params = <dynamic>[];
+        final whInfo = <String, dynamic>{};
+        if (warehouseId != null) {
+          params.add(warehouseId);
+          where += ' AND l.warehouse_id = \$${params.length}';
+          final wh = await db.execute('SELECT id, name, type FROM fh.warehouses WHERE id = \$1', parameters: [warehouseId]);
+          if (wh.isEmpty) return _json({'error': 'Ombor topilmadi'}, status: 404);
+          whInfo['id'] = wh.first[0];
+          whInfo['name'] = wh.first[1];
+          whInfo['type'] = wh.first[2];
+        }
+        if (itemId != null) {
+          params.add(itemId);
+          where += ' AND l.ref_id = \$${params.length}';
+        }
+
+        final result = await db.execute(
+          '''
+          SELECT
+            l.warehouse_id,
+            COALESCE(
+              CASE
+                WHEN l.item_type = \'raw_material\' THEN rm.code
+                WHEN l.item_type = \'item\' AND l.ref_id IS NOT NULL THEN l.ref_id::text
+                ELSE l.ref_barcode
+              END
+            ) AS ref_key,
+            MAX(l.name_snapshot) AS name,
+            MAX(l.unit) AS unit,
+            l.item_type,
+            l.ref_id,
+            SUM(CASE l.direction WHEN \'in\' THEN l.qty ELSE -l.qty END) AS balance
+          FROM fh.stock_ledger l
+          LEFT JOIN public.raw_materials rm ON rm.id = l.ref_id
+          WHERE $where
+          GROUP BY l.warehouse_id, l.item_type, COALESCE(
+            CASE
+              WHEN l.item_type = \'raw_material\' THEN rm.code
+              WHEN l.item_type = \'item\' AND l.ref_id IS NOT NULL THEN l.ref_id::text
+              ELSE l.ref_barcode
+            END
+          ), l.ref_id
+          HAVING SUM(CASE l.direction WHEN \'in\' THEN l.qty ELSE -l.qty END) <> 0
+          ORDER BY l.warehouse_id, name
+          ''',
+          parameters: params,
+        );
+
+        return _json({
+          'type': 'regime51',
+          'warehouse':
+              whInfo.isEmpty ? null : {'id': whInfo['id'], 'name': whInfo['name'], 'type': whInfo['type']},
+          'balance': result.map((r) => {
+            'warehouseId': r[0],
+            'refKey': r[1],
+            'name': r[2],
+            'unit': r[3],
+            'itemType': r[4],
+            'refId': r[5],
+            'balance': r[6]?.toString(),
+          }).toList(),
+        });
+      } catch (e) {
+        print('reports/regime51-balance xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
     // ---------- PLANS ----------
     get('/plans', (Request request) async {
       try {
@@ -1812,6 +1906,7 @@ extension _FhRoutes on Router {
         final qty = (body['qty'] as num?)?.toDouble();
         final unit = body['unit'] as String? ?? 'kg';
         final expectedAt = body['expected_at'] as String?;
+        final isRegime51 = body['is_regime_51'] as bool? ?? false;
 
         if (supplierName == null || rawMaterialId == null || qty == null || qty <= 0) {
           return _json({
@@ -1823,10 +1918,10 @@ extension _FhRoutes on Router {
         await db.execute(
           '''
           INSERT INTO fh.supplier_orders
-            (supplier_name, raw_material_id, qty, unit, expected_at, created_by)
-          VALUES (\$1, \$2, \$3, \$4, \$5::date, \$6)
+            (supplier_name, raw_material_id, qty, unit, expected_at, created_by, is_regime_51)
+          VALUES (\$1, \$2, \$3, \$4, \$5::date, \$6, \$7)
           ''',
-          parameters: [supplierName, rawMaterialId, qty, unit, expectedAt, _uid(request)],
+          parameters: [supplierName, rawMaterialId, qty, unit, expectedAt, _uid(request), isRegime51],
         );
 
         return _json({'message': "Buyurtma qo'shildi"}, status: 201);
@@ -3020,5 +3115,587 @@ extension _FhRoutes on Router {
         return _json({'error': 'Server xatosi'}, status: 500);
       }
     });
+
+    _registerHrRoutes();
   }
 }
+
+// ============================================================
+// HR MODULI — xodimlar, davomat, premiya/jarima/avans, hisobot
+// Ruxsatlar: admin/hr_manager — to''liq; director — faqat ko''rish.
+// ============================================================
+extension _HrRoutes on Router {
+  void _registerHrRoutes() {
+    bool _canRead(Request r) => Policy.canReadHr(_role(r));
+    bool _canManage(Request r) => Policy.canManageHr(_role(r));
+
+    // ───────────────────────── XODIMLAR ─────────────────────────
+    get('/hr/employees', (Request request) async {
+      if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final status = request.url.queryParameters['status'];
+        final department = request.url.queryParameters['department'];
+        final search = request.url.queryParameters['search'];
+        final params = <dynamic>[];
+        var where = 'TRUE';
+        if (status != null && status.isNotEmpty) {
+          params.add(status);
+          where += ' AND status = \$${params.length}';
+        }
+        if (department != null && department.isNotEmpty) {
+          params.add(department);
+          where += ' AND department = \$${params.length}';
+        }
+        if (search != null && search.isNotEmpty) {
+          params.add('%$search%');
+          where += ' AND full_name ILIKE \$${params.length}';
+        }
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          'SELECT id, full_name, position, department, phone, hire_date, '
+          'termination_date, status, base_salary, note '
+          'FROM fh.employees WHERE ${where} ORDER BY full_name',
+          parameters: params,
+        );
+        return _json({
+          'employees': res.map((r) => Employee.fromRow(r).toJson()).toList(),
+        });
+      } catch (e) {
+        print('hr employees GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/hr/employees', (Request request) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final body = await _body(request);
+        final fullName = (body['fullName'] as String?)?.trim();
+        if (fullName == null || fullName.isEmpty) {
+          return _json({'error': 'fullName majburiy'}, status: 400);
+        }
+final dateStr = body['hireDate'] as String?;
+        final hireDate = (dateStr == null || dateStr.isEmpty)
+            ? DateTime.now().toIso8601String().substring(0, 10)
+            : dateStr;
+        final salary = (body['baseSalary'] as num?)?.toDouble();
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          '''INSERT INTO fh.employees
+             (full_name, position, department, phone, hire_date, status, base_salary, note)
+             VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)
+             RETURNING id, full_name, position, department, phone, hire_date,
+                       termination_date, status, base_salary, note''',
+          parameters: [
+            fullName,
+            body['position'],
+            body['department'],
+            body['phone'],
+            hireDate,
+            body['status'] as String? ?? 'active',
+            salary,
+            body['note'],
+          ],
+        );
+        return _json({'employee': Employee.fromRow(res.first).toJson()}, status: 201);
+      } catch (e) {
+        print('hr employees POST xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    get('/hr/employees/<id>', (Request request, String id) async {
+      if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      final eid = int.tryParse(id);
+      if (eid == null) return _json({'error': 'Noto\'g\'ri id'}, status: 400);
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          'SELECT id, full_name, position, department, phone, hire_date, '
+          'termination_date, status, base_salary, note '
+          'FROM fh.employees WHERE id = \$1',
+          parameters: [eid],
+        );
+        if (res.isEmpty) return _json({'error': 'Xodim topilmadi'}, status: 404);
+        return _json({'employee': Employee.fromRow(res.first).toJson()});
+      } catch (e) {
+        print('hr employee GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    put('/hr/employees/<id>', (Request request, String id) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      final eid = int.tryParse(id);
+      if (eid == null) return _json({'error': 'Noto\'g\'ri id'}, status: 400);
+      try {
+        final body = await _body(request);
+        final fields = <String, dynamic>{
+          'full_name': null,
+          'position': null,
+          'department': null,
+          'phone': null,
+          'status': null,
+          'note': null,
+        };
+        final setParts = <String>[];
+        final params = <dynamic>[];
+        if (body['fullName'] != null) {
+          fields['full_name'] = (body['fullName'] as String).trim();
+        }
+        if (body['baseSalary'] != null) {
+          fields['base_salary'] = (body['baseSalary'] as num).toDouble();
+        }
+if (body['hireDate'] != null) {
+          final hd = (body['hireDate'] as String).trim();
+          if (hd.isNotEmpty) {
+            fields['hire_date'] = hd;
+          }
+        }
+        if (body['terminationDate'] != null) {
+          fields['termination_date'] = (body['terminationDate'] as String).isEmpty
+              ? null
+              : (body['terminationDate'] as String);
+        }
+        for (final key in fields.keys) {
+          final v = fields[key];
+          if (v == null) continue;
+          params.add(v);
+          setParts.add('$key = \$${params.length}');
+        }
+        if (setParts.isEmpty) {
+          return _json({'error': 'Yangilash uchun maydon kerak'}, status: 400);
+        }
+        setParts.add('updated_at = now()');
+        params.add(eid);
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          'UPDATE fh.employees SET ${setParts.join(', ')} WHERE id = \$${params.length} '
+          'RETURNING id, full_name, position, department, phone, hire_date, '
+          'termination_date, status, base_salary, note',
+          parameters: params,
+        );
+        if (res.isEmpty) return _json({'error': 'Xodim topilmadi'}, status: 404);
+        return _json({'employee': Employee.fromRow(res.first).toJson()});
+      } catch (e) {
+        print('hr employee PUT xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    delete('/hr/employees/<id>', (Request request, String id) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      final eid = int.tryParse(id);
+      if (eid == null) return _json({'error': 'Noto\'g\'ri id'}, status: 400);
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          "UPDATE fh.employees SET status = 'terminated', termination_date = CURRENT_DATE "
+          'WHERE id = \$1 AND status <> \'terminated\'',
+          parameters: [eid],
+        );
+        if (res.affectedRows == 0) {
+          final existing = await db.execute('SELECT 1 FROM fh.employees WHERE id = \$1', parameters: [eid]);
+          if (existing.isEmpty) return _json({'error': 'Xodim topilmadi'}, status: 404);
+          return _json({'message': 'Xodim allaqachon ishdan bo\'shatilgan'});
+        }
+        return _json({'message': 'Xodim ishdan bo\'shatildi'});
+      } catch (e) {
+        print('hr employee DELETE xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ───────────────────────── DAVOMAT ─────────────────────────
+    get('/hr/attendance', (Request request) async {
+      if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final q = request.url.queryParameters;
+        final params = <dynamic>[];
+        var where = 'TRUE';
+        final empId = int.tryParse(q['employee_id'] ?? '');
+        if (empId != null) {
+          params.add(empId);
+          where += ' AND a.employee_id = \$${params.length}';
+        }
+        if (q['from'] != null && q['from']!.isNotEmpty) {
+          params.add(q['from']);
+          where += ' AND a.work_date >= \$${params.length}';
+        }
+        if (q['to'] != null && q['to']!.isNotEmpty) {
+          params.add(q['to']);
+          where += ' AND a.work_date <= \$${params.length}';
+        }
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          'SELECT a.id, a.employee_id, a.work_date, a.check_in, a.check_out, '
+          'a.hours_worked, a.status, a.note, a.recorded_by, e.full_name '
+          'FROM fh.attendance a JOIN fh.employees e ON e.id = a.employee_id '
+          'WHERE ${where} ORDER BY a.work_date DESC, a.employee_id',
+          parameters: params,
+        );
+        final list = res.map((r) {
+          final m = AttendanceRecord.fromRow(r).toJson();
+          m['employeeName'] = r[9];
+          return m;
+        }).toList();
+        return _json({'attendance': list});
+      } catch (e) {
+        print('hr attendance GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+double? _hours(String? inStr, String? outStr) {
+      if (inStr == null || outStr == null) return null;
+      final a = DateTime.tryParse('2000-01-01 $inStr');
+      final b = DateTime.tryParse('2000-01-01 $outStr');
+      if (a == null || b == null) return null;
+      final diff = b.difference(a).inMinutes / 60.0;
+      return double.parse(diff.toStringAsFixed(2));
+    }
+
+    String? _timeToHm(dynamic v) {
+      if (v == null) return null;
+      if (v is Time) {
+        final h = v.hour == 24 ? 0 : v.hour;
+        return '${h.toString().padLeft(2, '0')}:${v.minute.toString().padLeft(2, '0')}';
+      }
+      return v.toString();
+    }
+
+    post('/hr/attendance', (Request request) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final body = await _body(request);
+        final eid = body['employeeId'] as int?;
+        final workDate = body['workDate'] as String?;
+        final status = body['status'] as String? ?? 'present';
+        final checkIn = body['checkIn'] as String?;
+        final checkOut = body['checkOut'] as String?;
+        if (eid == null || workDate == null || workDate.isEmpty) {
+          return _json({'error': 'employeeId va workDate majburiy'}, status: 400);
+        }
+        final hours = _hours(checkIn?.isEmpty ?? true ? null : checkIn,
+            checkOut?.isEmpty ?? true ? null : checkOut);
+        final db = await DatabaseConnection.getConnection();
+        try {
+          final res = await db.execute(
+            '''INSERT INTO fh.attendance
+               (employee_id, work_date, check_in, check_out, hours_worked, status, note, recorded_by)
+               VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)
+               RETURNING id, employee_id, work_date, check_in, check_out,
+                         hours_worked, status, note, recorded_by''',
+            parameters: [
+              eid, workDate,
+              checkIn?.isEmpty ?? true ? null : checkIn,
+              checkOut?.isEmpty ?? true ? null : checkOut,
+              hours, status, body['note'], _uid(request),
+            ],
+          );
+return _json({'attendance': AttendanceRecord.fromRow(res.first).toJson()}, status: 201);
+        } on PgException catch (e) {
+          if (e is ServerException && e.code == '23505') {
+            return _json({'error': 'Bu kun uchun yozuv allaqachon bor', 'duplicate': true}, status: 409);
+          }
+          rethrow;
+        }
+      } catch (e) {
+        print('hr attendance POST xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/hr/attendance/bulk', (Request request) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final body = await _body(request);
+        final workDate = body['workDate'] as String?;
+        final records = body['records'] as List<dynamic>?;
+        if (workDate == null || workDate.isEmpty) {
+          return _json({'error': 'workDate majburiy'}, status: 400);
+        }
+        if (records == null || records.isEmpty) {
+          return _json({'error': 'records bo\'sh'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        final inserted = <Map<String, dynamic>>[];
+        final errors = <Map<String, dynamic>>[];
+        for (final rec in records) {
+          final m = rec as Map<String, dynamic>;
+          final eid = m['employeeId'] as int?;
+          if (eid == null) continue;
+          final status = m['status'] as String? ?? 'present';
+          final checkIn = m['checkIn'] as String?;
+          final checkOut = m['checkOut'] as String?;
+          final hours = _hours(checkIn?.isEmpty ?? true ? null : checkIn,
+              checkOut?.isEmpty ?? true ? null : checkOut);
+          try {
+            final res = await db.execute(
+              '''INSERT INTO fh.attendance
+                 (employee_id, work_date, check_in, check_out, hours_worked, status, note, recorded_by)
+                 VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)
+                 RETURNING id, employee_id, work_date, check_in, check_out,
+                           hours_worked, status, note, recorded_by''',
+              parameters: [
+                eid, workDate,
+                checkIn?.isEmpty ?? true ? null : checkIn,
+                checkOut?.isEmpty ?? true ? null : checkOut,
+                hours, status, m['note'], _uid(request),
+              ],
+            );
+inserted.add(AttendanceRecord.fromRow(res.first).toJson());
+          } on PgException catch (e) {
+            if (e is ServerException && e.code == '23505') {
+              errors.add({'employeeId': eid, 'error': 'Bu kun uchun yozuv allaqachon bor'});
+            } else {
+              errors.add({'employeeId': eid, 'error': 'Xatolik: ${e.message}'});
+            }
+          } catch (e) {
+            errors.add({'employeeId': eid, 'error': 'Xatolik: $e'});
+          }
+        }
+        return _json({
+          'inserted': inserted,
+          'errors': errors,
+        }, status: errors.isEmpty ? 201 : 200);
+      } catch (e) {
+        print('hr attendance bulk xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    put('/hr/attendance/<id>', (Request request, String id) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      final aid = int.tryParse(id);
+      if (aid == null) return _json({'error': 'Noto\'g\'ri id'}, status: 400);
+      try {
+        final body = await _body(request);
+        final db = await DatabaseConnection.getConnection();
+        // Mavjud qiymatlarni olib, yangilangan in/out bilan hours hisoblaymiz.
+        final cur = await db.execute(
+          'SELECT check_in, check_out FROM fh.attendance WHERE id = \$1',
+          parameters: [aid],
+        );
+        if (cur.isEmpty) return _json({'error': 'Yozuv topilmadi'}, status: 404);
+
+String? existingIn = _timeToHm(cur.first[0]);
+        String? existingOut = _timeToHm(cur.first[1]);
+        final setParts = <String>[];
+        final params = <dynamic>[];
+        final bodyIn = body['checkIn'] as String?;
+        final bodyOut = body['checkOut'] as String?;
+        final bodyStatus = body['status'] as String?;
+
+        bool recalcHours = false;
+        if (bodyIn != null) {
+          existingIn = bodyIn;
+          setParts.add('check_in = \$${params.length + 1}');
+          params.add(bodyIn.isEmpty ? null : bodyIn);
+          if (!bodyIn.isEmpty) recalcHours = true;
+        }
+        if (bodyOut != null) {
+          existingOut = bodyOut;
+          setParts.add('check_out = \$${params.length + 1}');
+          params.add(bodyOut.isEmpty ? null : bodyOut);
+          if (!bodyOut.isEmpty) recalcHours = true;
+        }
+        if (recalcHours) {
+          setParts.add('hours_worked = \$${params.length + 1}');
+          params.add(_hours(existingIn, existingOut));
+        }
+        if (bodyStatus != null) {
+          setParts.add('status = \$${params.length + 1}');
+          params.add(bodyStatus);
+        }
+        if (body['note'] != null) {
+          setParts.add('note = \$${params.length + 1}');
+          params.add(body['note']);
+        }
+        if (setParts.isEmpty) {
+          return _json({'error': 'Yangilash uchun maydon kerak'}, status: 400);
+        }
+        params.add(aid);
+        final res = await db.execute(
+          'UPDATE fh.attendance SET ${setParts.join(', ')} WHERE id = \$${params.length} '
+          'RETURNING id, employee_id, work_date, check_in, check_out, '
+          'hours_worked, status, note, recorded_by',
+          parameters: params,
+        );
+        return _json({'attendance': AttendanceRecord.fromRow(res.first).toJson()});
+      } catch (e) {
+        print('hr attendance PUT xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ────────────────── PREMIYA / JARIMA / AVANS ──────────────────
+    get('/hr/salary-adjustments', (Request request) async {
+      if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final q = request.url.queryParameters;
+        final params = <dynamic>[];
+        var where = 'TRUE';
+        final empId = int.tryParse(q['employee_id'] ?? '');
+        if (empId != null) {
+          params.add(empId);
+          where += ' AND s.employee_id = \$${params.length}';
+        }
+        if (q['type'] != null && q['type']!.isNotEmpty) {
+          params.add(q['type']);
+          where += ' AND s.adjustment_type = \$${params.length}';
+        }
+        if (q['status'] != null && q['status']!.isNotEmpty) {
+          params.add(q['status']);
+          where += ' AND s.status = \$${params.length}';
+        }
+        if (q['from'] != null && q['from']!.isNotEmpty) {
+          params.add(q['from']);
+          where += ' AND s.adjustment_date >= \$${params.length}';
+        }
+        if (q['to'] != null && q['to']!.isNotEmpty) {
+          params.add(q['to']);
+          where += ' AND s.adjustment_date <= \$${params.length}';
+        }
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          'SELECT s.id, s.employee_id, s.adjustment_type, s.amount, s.reason, '
+          's.adjustment_date, s.status, s.approved_by, e.full_name '
+          'FROM fh.salary_adjustments s JOIN fh.employees e ON e.id = s.employee_id '
+          'WHERE ${where} ORDER BY s.adjustment_date DESC, s.id DESC',
+          parameters: params,
+        );
+        final list = res.map((r) {
+          final m = SalaryAdjustment.fromRow(r).toJson();
+          m['employeeName'] = r[8];
+          return m;
+        }).toList();
+        return _json({'adjustments': list});
+      } catch (e) {
+        print('hr salary-adjustments GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/hr/salary-adjustments', (Request request) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final body = await _body(request);
+        final eid = body['employeeId'] as int?;
+        final type = body['adjustmentType'] as String?;
+        final amount = (body['amount'] as num?)?.toDouble();
+        final reason = (body['reason'] as String?)?.trim();
+        if (eid == null || type == null || amount == null || amount <= 0) {
+          return _json({'error': 'employeeId, adjustmentType va amount (>0) majburiy'}, status: 400);
+        }
+        if (reason == null || reason.isEmpty) {
+          return _json({'error': 'reason majburiy'}, status: 400);
+        }
+        final allowed = ['bonus', 'penalty', 'advance', 'other'];
+        if (!allowed.contains(type)) {
+          return _json({'error': 'adjustmentType noto\'g\'ri'}, status: 400);
+        }
+        final dateStr = body['adjustmentDate'] as String?;
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          '''INSERT INTO fh.salary_adjustments
+             (employee_id, adjustment_type, amount, reason, adjustment_date, status)
+             VALUES (\$1, \$2, \$3, \$4, \$5, \$6)
+             RETURNING id, employee_id, adjustment_type, amount, reason,
+                       adjustment_date, status, approved_by''',
+          parameters: [
+            eid, type, amount, reason,
+            dateStr?.isEmpty ?? true ? null : dateStr,
+            body['status'] as String? ?? 'pending',
+          ],
+        );
+        return _json({'adjustment': SalaryAdjustment.fromRow(res.first).toJson()}, status: 201);
+      } catch (e) {
+        print('hr salary-adjustments POST xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    Future<Response> _setAdjustmentStatus(Request request, String id, String newStatus) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      final aid = int.tryParse(id);
+      if (aid == null) return _json({'error': 'Noto\'g\'ri id'}, status: 400);
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          'UPDATE fh.salary_adjustments SET status = \$1, approved_by = \$2 '
+          'WHERE id = \$3 AND status = \'pending\'',
+          parameters: [newStatus, _uid(request), aid],
+        );
+        if (res.affectedRows == 0) {
+          final existing = await db.execute('SELECT status FROM fh.salary_adjustments WHERE id = \$1', parameters: [aid]);
+          if (existing.isEmpty) return _json({'error': 'Yozuv topilmadi'}, status: 404);
+          return _json({'error': 'Yozuv allaqachon qayta ishlangan (${existing.first[0]})'}, status: 409);
+        }
+        return _json({'ok': true, 'status': newStatus});
+      } catch (e) {
+        print('hr adjustment approve/reject xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    }
+
+    put('/hr/salary-adjustments/<id>/approve', (Request request, String id) async {
+      return _setAdjustmentStatus(request, id, 'approved');
+    });
+
+    put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
+      return _setAdjustmentStatus(request, id, 'rejected');
+    });
+
+    // ───────────────────────── HISOBOT ─────────────────────────
+    get('/hr/reports/monthly', (Request request) async {
+      if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final q = request.url.queryParameters;
+        final params = <dynamic>[];
+        var where = 'TRUE';
+        final empId = int.tryParse(q['employee_id'] ?? '');
+        if (empId != null) {
+          params.add(empId);
+          where += ' AND employee_id = \$${params.length}';
+        }
+        final month = q['month'];
+        if (month != null && month.isNotEmpty) {
+          params.add(month);
+          where += ' AND to_char(month, \'YYYY-MM\') = \$${params.length}';
+        }
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          'SELECT employee_id, full_name, position, department, base_salary, month, '
+          'days_present, days_absent, days_late, days_sick, days_vacation, total_hours, '
+          'total_bonus, total_penalty, total_advance '
+          'FROM fh.monthly_payroll_summary WHERE ${where} '
+          'ORDER BY month DESC, full_name',
+          parameters: params,
+        );
+        final list = res.map((r) => {
+          'employeeId': r[0],
+          'fullName': r[1],
+          'position': r[2],
+          'department': r[3],
+          'baseSalary': r[4]?.toString(),
+          'month': (r[5] as DateTime).toIso8601String().substring(0, 10),
+          'daysPresent': r[6],
+          'daysAbsent': r[7],
+          'daysLate': r[8],
+          'daysSick': r[9],
+          'daysVacation': r[10],
+          'totalHours': r[11]?.toString(),
+          'totalBonus': r[12]?.toString(),
+          'totalPenalty': r[13]?.toString(),
+          'totalAdvance': r[14]?.toString(),
+        }).toList();
+        return _json({'rows': list});
+      } catch (e) {
+        print('hr reports monthly xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+  }
+}
+

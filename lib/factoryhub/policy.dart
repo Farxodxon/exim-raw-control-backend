@@ -4,6 +4,7 @@ class AppRoles {
   static const warehouseKeeper = 'warehouse_keeper';
   static const warehouseController = 'warehouse_controller';
   static const director = 'director';
+  static const hrManager = 'hr_manager';
 
   static const all = <String>[
     admin,
@@ -11,6 +12,7 @@ class AppRoles {
     warehouseKeeper,
     warehouseController,
     director,
+    hrManager,
   ];
 
   static bool isValid(String role) => all.contains(role);
@@ -32,4 +34,14 @@ class Policy {
 
   static bool canControlWarehouses(String role) =>
       role == AppRoles.admin || role == AppRoles.warehouseController;
+
+  // ─── HR moduli ─────────────────────────────────────────────
+  // admin — to'liq; hr_manager — to'liq (faqat HR); director — faqat ko'rish.
+  static bool canReadHr(String role) =>
+      role == AppRoles.admin ||
+      role == AppRoles.hrManager ||
+      role == AppRoles.director;
+
+  static bool canManageHr(String role) =>
+      role == AppRoles.admin || role == AppRoles.hrManager;
 }
