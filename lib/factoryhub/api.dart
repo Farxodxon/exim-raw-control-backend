@@ -2872,7 +2872,7 @@ if (!_fullAccess(role) && userId != null) {
       }
     });
 
-    put('/boms/<id>', (Request request, String id) async {
+put('/boms/<id>', (Request request, String id) async {
       if (!Policy.canControlWarehouses(_role(request))) {
         return _json({'error': 'Ruxsat yoq'}, status: 403);
       }
@@ -2885,32 +2885,40 @@ if (!_fullAccess(role) && userId != null) {
         final outputQty = (body['output_qty'] as num?)?.toDouble();
         final outputItemId = body['output_item_id'] as int?;
         final outputUnit = body['output_unit'] as String?;
+        final items = body['items'] as List<dynamic>?;
         if (active != null) {
           final db = await DatabaseConnection.getConnection();
           await db.execute('UPDATE fh.boms SET is_active = \$1 WHERE id = \$2',
             parameters: [active, bomId]);
           return _json({'message': 'Yangilandi'});
         }
-        if (name != null || outputQty != null || outputItemId != null || outputUnit != null) {
-          final db = await DatabaseConnection.getConnection();
+        if (name == null && outputQty == null && outputItemId == null &&
+            outputUnit == null && items == null) {
+          return _json({'error': 'Yangilanadigan maydon topilmadi'}, status: 400);
+        }
+        if (outputQty != null && outputQty <= 0) {
+          return _json({'error': 'Chiqadigan miqdor 0 dan katta bo\'lishi kerak'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        if (outputItemId != null) {
+          // output_item_id mavjudligini tekshirish
+          final oi = await db.execute(
+            'SELECT id FROM fh.items WHERE id = \$1 AND is_active', parameters: [outputItemId]);
+          if (oi.isEmpty) {
+            return _json({'error': 'Chiqadigan mahsulot (item) topilmadi'}, status: 400);
+          }
+        }
+        await db.execute('BEGIN');
+        try {
           if (name != null) {
             await db.execute('UPDATE fh.boms SET name = \$1 WHERE id = \$2',
               parameters: [name.trim(), bomId]);
           }
           if (outputQty != null) {
-            if (outputQty <= 0) {
-              return _json({'error': 'Chiqadigan miqdor 0 dan katta bo\'lishi kerak'}, status: 400);
-            }
             await db.execute('UPDATE fh.boms SET output_qty_per_batch = \$1 WHERE id = \$2',
               parameters: [outputQty, bomId]);
           }
           if (outputItemId != null) {
-            // output_item_id mavjudligini tekshirish
-            final oi = await db.execute(
-              'SELECT id FROM fh.items WHERE id = \$1 AND is_active', parameters: [outputItemId]);
-            if (oi.isEmpty) {
-              return _json({'error': 'Chiqadigan mahsulot (item) topilmadi'}, status: 400);
-            }
             await db.execute('UPDATE fh.boms SET output_item_id = \$1 WHERE id = \$2',
               parameters: [outputItemId, bomId]);
           }
@@ -2918,9 +2926,39 @@ if (!_fullAccess(role) && userId != null) {
             await db.execute('UPDATE fh.boms SET output_unit = \$1 WHERE id = \$2',
               parameters: [outputUnit, bomId]);
           }
+          if (items != null) {
+            // Tarkibni butunlay yangi ro'yxatga almashtirish.
+            await db.execute('DELETE FROM fh.bom_items WHERE bom_id = \$1',
+              parameters: [bomId]);
+            final parsed = <List<dynamic>>[];
+            for (final it in items) {
+              final itemType = it['item_type'] as String?;
+              final refId = it['ref_id'] as int?;
+              final refBarcode = it['ref_barcode'] as String?;
+              final nameSnapshot = it['name'] as String? ?? '';
+              final unit = it['unit'] as String? ?? 'dona';
+              final qty = (it['qty'] as num?)?.toDouble();
+              if (itemType == null || qty == null || qty <= 0) continue;
+              parsed.add([itemType, refId, refBarcode, nameSnapshot, unit, qty]);
+            }
+            if (parsed.isEmpty) {
+              await db.execute('ROLLBACK');
+              return _json({'error': 'Hech bo\'lmaganda bitta tarkib qatori kerak'}, status: 400);
+            }
+            for (final p in parsed) {
+              await db.execute(
+                'INSERT INTO fh.bom_items (bom_id, item_type, ref_id, ref_barcode, name_snapshot, unit, qty) '
+                'VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7)',
+                parameters: [bomId, p[0], p[1], p[2], p[3], p[4], p[5]],
+              );
+            }
+          }
+          await db.execute('COMMIT');
           return _json({'message': 'Yangilandi'});
+        } catch (_) {
+          await db.execute('ROLLBACK');
+          rethrow;
         }
-        return _json({'error': 'Yangilanadigan maydon topilmadi'}, status: 400);
       } catch (e) {
         print('boms/<id> PUT xato: $e');
         return _json({'error': 'Retseptni yangilashda xatolik yuz berdi'}, status: 500);
