@@ -117,6 +117,33 @@ Future<Map<String, dynamic>?> _itemBrief(Connection db, int? id) async {
   return {'id': r[0], 'name': r[1], 'itemType': r[2], 'code': r[3], 'unit': r[4]};
 }
 
+// Transfer sodir bo'layotgan item haqida ma'lumot: avval manba ombor qoldig'idan
+// (legacy raw_material/product'lar fh.items da yo'q), shu topilmasa fh.items dan.
+Future<Map<String, dynamic>?> _resolveItem(
+    Connection db, int? itemId, int? srcWhId) async {
+  if (srcWhId != null && itemId != null) {
+    final res = await db.execute(
+      '''
+      SELECT item_type, MAX(name_snapshot), MAX(unit), MAX(ref_id), MAX(ref_barcode)
+      FROM fh.stock_ledger
+      WHERE warehouse_id = \$1 AND COALESCE(ref_id::text, ref_barcode) = \$2::int::text
+      GROUP BY item_type
+      ''',
+      parameters: [srcWhId, itemId],
+    );
+    if (res.isNotEmpty) {
+      return {
+        'itemType': res.first[0],
+        'name': res.first[1],
+        'unit': res.first[2],
+        'refId': res.first[3],
+        'refBarcode': res.first[4],
+      };
+    }
+  }
+  return _itemBrief(db, itemId);
+}
+
 void _buildSheet(Excel excel, String sheetName, List<dynamic> rows, String direction, String from, String to) {
   final sheet = excel[sheetName];
 
@@ -1814,11 +1841,13 @@ get('/transfers', (Request request) async {
           }, status: 403);
         }
 
-        final item = await _itemBrief(db, itemId);
+        final item = await _resolveItem(db, itemId, srcId);
         if (item == null) return _json({'error': 'Mahsulot topilmadi'}, status: 404);
         final itemType = (item['itemType'] as String?) ?? 'item';
-        final name = item['name'];
-        final useUnit = (unit == null || unit.isEmpty) ? (item['unit'] ?? 'dona') : unit;
+        final name = item['name'] ?? 'Mahsulot';
+        final useUnit = (unit == null || unit.isEmpty)
+            ? ((item['unit'] as String?) ?? 'dona')
+            : unit;
 
         // Yetarlilik (qo'lda chiqim nazorati bilan bir xil aniqlik).
         final balRow = await db.execute(
@@ -1892,12 +1921,18 @@ get('/transfers', (Request request) async {
         final db = await DatabaseConnection.getConnection();
         final result = await db.execute(
           '''
-          SELECT t.id, t.item_id, i.name AS item_name, t.unit, t.quantity,
+          SELECT t.id, t.item_id,
+                 COALESCE(i.name, (
+                   SELECT MAX(l.name_snapshot) FROM fh.stock_ledger l
+                   WHERE COALESCE(l.ref_id::text, l.ref_barcode) = t.item_id::text
+                     AND l.warehouse_id = t.source_warehouse_id
+                 ), ('Mahsulot #' || t.item_id)) AS item_name,
+                 t.unit, t.quantity,
                  t.source_warehouse_id, sw.name AS source_name,
                  t.dest_warehouse_id, dw.name AS dest_name,
                  t.production_batch_id, t.created_by, u.username, t.created_at, t.status
           FROM fh.stock_transfers t
-          JOIN fh.items i ON i.id = t.item_id
+          LEFT JOIN fh.items i ON i.id = t.item_id
           LEFT JOIN fh.warehouses sw ON sw.id = t.source_warehouse_id
           JOIN fh.warehouses dw ON dw.id = t.dest_warehouse_id
           LEFT JOIN fh.users u ON u.id = t.created_by
@@ -3747,7 +3782,8 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         final qty = double.parse(r[2].toString());
         final unit = r[3] as String;
         final batchId = r[6] as int?;
-        final item = await _itemBrief(db, itemId) ?? <String, dynamic>{'name': 'Mahsulot'};
+        final srcId = r[4] as int?;
+        final item = await _resolveItem(db, itemId, srcId) ?? <String, dynamic>{'name': 'Mahsulot'};
         final uid = _uid(request);
 
         await db.execute('BEGIN');
@@ -3819,7 +3855,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         final qty = double.parse(r[2].toString());
         final unit = r[3] as String;
         final batchId = r[6] as int?;
-        final item = await _itemBrief(db, itemId) ?? <String, dynamic>{'name': 'Mahsulot'};
+        final item = await _resolveItem(db, itemId, srcId) ?? <String, dynamic>{'name': 'Mahsulot'};
         final uid = _uid(request);
 
         // Rad etilgan miqdor qayerga: qo'lda yuborilgan (production_batch_id=null)
@@ -4005,7 +4041,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         final itemId = r[1] as int;
         final qty = double.parse(r[2].toString());
         final unit = r[3] as String;
-        final item = await _itemBrief(db, itemId) ?? <String, dynamic>{'name': 'Mahsulot'};
+        final item = await _resolveItem(db, itemId, qWhId) ?? <String, dynamic>{'name': 'Mahsulot'};
         final uid = _uid(request);
 
         // approved → Xom-ashyo ombori, rejected → Brak/nikoz ombori
