@@ -412,19 +412,23 @@ Future<void> main() async {
   (s, _) = await call('GET',
       '/production/mixing/preview?bom_id=$idBomMx&output_quantity=10', tokenStr: keeperToken);
   check('keeper preview 403 (no module)', s == 403, 'status=$s');
-  (s, _) = await call('GET', '/transfers/pending?warehouse_id=$whSemi', tokenStr: keeperToken);
-  check('keeper pending 403 (no module)', s == 403, 'status=$s');
   (s, _) = await call('POST', '/inspections/receive',
       body: {'item_id': iRaw, 'quantity': 2, 'quarantine_warehouse_id': whQuar},
       tokenStr: keeperToken);
   check('keeper receive 403 (no module)', s == 403, 'status=$s');
 
-  await c.execute(
-      "INSERT INTO fh.user_modules (user_id, module_key) VALUES (\$1, 'production'),(\$1, 'transfer_confirmations'),(\$1, 'inspection')",
-      parameters: [keeperId]);
+  // OMBOR granti BOR, modul YO'Q bo'lsa ham qabul tasdiqlash ko'rinadi
+  // (modul talab olib tashlangan — nazorat berilgan har kimga ochiq).
   await c.execute(
       'INSERT INTO fh.user_warehouses (user_id, warehouse_id) VALUES (\$1, \$2),(\$1, \$3)',
       parameters: [keeperId, whSemi, whQuar]);
+
+  (s, _) = await call('GET', '/transfers/pending?warehouse_id=$whSemi', tokenStr: keeperToken);
+  check('keeper pending 200 (ombor granti, modulsiz)', s == 200, 'status=$s');
+
+  await c.execute(
+      "INSERT INTO fh.user_modules (user_id, module_key) VALUES (\$1, 'production'),(\$1, 'transfer_confirmations'),(\$1, 'inspection')",
+      parameters: [keeperId]);
 
   (s, _) = await call('GET',
       '/production/mixing/preview?bom_id=$idBomMx&output_quantity=10', tokenStr: keeperToken);

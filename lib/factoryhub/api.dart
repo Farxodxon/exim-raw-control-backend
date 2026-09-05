@@ -61,10 +61,9 @@ String? _moduleKeyForPath(String path) {
   if (path.startsWith('production/mixing')) return 'production';
   if (path.startsWith('production/packaging')) return 'packaging';
   if (path.startsWith('production/')) return 'production';
-  if (path == 'transfers/pending' ||
-      RegExp(r'^transfers/\d+/(confirm|reject)$').hasMatch(path)) {
-    return 'transfer_confirmations';
-  }
+  // Qabul tasdiqlash (transfers/pending, confirm, reject) chegirmasi MODUL
+  // emas, omborga kirish (user_warehouses) orqali beriladi — shuning uchun
+  // bu yerda sezilarli emas: nazorat berilgan har kimga ko'rinadi.
   if (path.startsWith('inspections/')) return 'inspection';
   if (path.startsWith('hr/')) return 'hr';
   if (path.startsWith('plans')) return 'planning';
