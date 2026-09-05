@@ -1213,8 +1213,11 @@ var result;
         }
         final info = infoResult.first;
 
-        final routesResult = await db.execute(
-          'SELECT to_warehouse_id FROM fh.warehouse_transfer_routes WHERE from_warehouse_id = \$1',
+final routesResult = await db.execute(
+          'SELECT r.to_warehouse_id, w.name '
+          'FROM fh.warehouse_transfer_routes r '
+          'JOIN fh.warehouses w ON w.id = r.to_warehouse_id '
+          'WHERE r.from_warehouse_id = \$1 ORDER BY r.to_warehouse_id',
           parameters: [warehouseId],
         );
 
@@ -1259,8 +1262,11 @@ var result;
             'canAnalyze': info[4] ?? true,
             'canTransfer': info[5] ?? false,
             'canIncome': info[6] ?? true,
-            'canExpense': info[7] ?? true,
+'canExpense': info[7] ?? true,
             'transferTo': routesResult.map((r) => r[0]).toList(),
+            'transferToWarehouses': routesResult.map((r) => {
+              'id': r[0], 'name': r[1],
+            }).toList(),
           },
           'stock': stockResult.map((row) => {
             'itemType': row[0], 'refKey': row[1], 'name': row[2],
