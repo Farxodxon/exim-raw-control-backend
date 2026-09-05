@@ -113,6 +113,7 @@ Future<void> main() async {
   }
   useDefs(whFor('production'), whFor('semi_finished'), whFor('packaging'),
       whFor('raw'), whFor('defective'), whFor('quarantine'), whFor('finished'));
+  final whSales = whFor('sales');
 
   final adminTok = token(userId: adminId, role: 'admin');
   final opsTok = token(userId: opsId, role: 'operations_manager');
@@ -247,10 +248,13 @@ Future<void> main() async {
   check('pending has t1', t1Row.isNotEmpty, '$pend');
   if (t1Row.isNotEmpty) {
     final m = t1Row.first as Map;
-    check('t1 source is production', m['sourceName'] == 'Ishlab chiqarishdan', '$m');
+    check('t1 source is production wh', (m['sourceWarehouseId'] as num?)?.toInt() == whProd, '$m');
     check('t1 qty 10', (m['quantity'] as String) == '10' || double.parse(m['quantity'] as String) == 10, '$m');
     check('t1 dest whSemi', m['destWarehouseId'] == whSemi, '$m');
   }
+  final trSrc1 = await c.execute(
+      'SELECT source_warehouse_id FROM fh.stock_transfers WHERE id = \$1', parameters: [t1]);
+  check('mixing transfer source=production (filled)', trSrc1.isNotEmpty && (trSrc1.first[0] as num).toInt() == whProd, '$trSrc1');
 
   (s, j) = await call('POST', '/transfers/$t1/confirm', tokenStr: adminTok);
   check('confirm t1 200', s == 200, 'status=$s $j');
@@ -319,6 +323,10 @@ Future<void> main() async {
   check('packaging consume semi 60->58', semiBal == 58, 'semi=$semiBal');
   check('packaging consume pkg 50->48', pkgBal == 48, 'pkg=$pkgBal');
   check('fin not added before confirm', finBal0 == 0, 'fin=$finBal0');
+
+  final trSrc3 = await c.execute(
+      'SELECT source_warehouse_id FROM fh.stock_transfers WHERE id = \$1', parameters: [t3]);
+  check('packaging transfer source=semi (filled)', trSrc3.isNotEmpty && (trSrc3.first[0] as num).toInt() == whSemi, '$trSrc3');
 
   (s, j) = await call('GET', '/transfers/pending?warehouse_id=$whFin', tokenStr: adminTok);
   pend = (j['transfers'] as List);
@@ -461,6 +469,117 @@ Future<void> main() async {
   final t5 = (j['transferId'] as num?)?.toInt();
   (s, _) = await call('POST', '/transfers/$t5/confirm', tokenStr: adminTok);
   check('confirm ops-batch 200', s == 200, 'status=$s');
+
+  // ── 9. QO'LDA YUBORISH (POST /transfers/send) + zanjir yo'llari ─────
+  // 1-bo'g'in: Xom-ashyo ombori -> Ishlab chiqarish ombori
+  await c.execute(
+    '''
+    INSERT INTO fh.stock_ledger (warehouse_id, item_type, ref_id, name_snapshot, unit,
+                                 direction, qty, source_type, performed_by, note)
+    VALUES (\$1, 'raw', \$2, 'E2E Xom ashyo', 'kg', 'in', 40, 'manual', \$3, 'E2E seed')
+    ''',
+    parameters: [whRaw, iRaw, adminId],
+  );
+  var rawBalRaw = await balance(c, whRaw, 'raw', iRaw);
+  check('manual seed raw 45', rawBalRaw == 45, 'raw=$rawBalRaw');
+
+  (s, j) = await call('POST', '/transfers/send',
+      body: {
+        'item_id': iRaw, 'quantity': 10, 'unit': 'kg',
+        'source_warehouse_id': whRaw, 'dest_warehouse_id': whProd,
+      },
+      tokenStr: adminTok);
+  check('manual send 201', s == 201, 'status=$s $j');
+  final tS1 = (j['transferId'] as num?)?.toInt();
+  check('manual send pending flag', j['pending'] == true, '$j');
+  final srcRow = await c.execute(
+      'SELECT source_warehouse_id FROM fh.stock_transfers WHERE id = \$1', parameters: [tS1]);
+  check('manual source filled', srcRow.isNotEmpty && (srcRow.first[0] as num).toInt() == whRaw, '$srcRow');
+
+  rawBalRaw = await balance(c, whRaw, 'raw', iRaw);
+  check('raw darhol 45->35', rawBalRaw == 35, 'raw=$rawBalRaw');
+  var prodBal = await balance(c, whProd, 'raw', iRaw);
+  check('prod o\'zgarishsiz 84 (confirm kutiladi)', prodBal == 84, 'prod=$prodBal');
+
+  (s, j) = await call('GET', '/transfers/pending?warehouse_id=$whProd', tokenStr: adminTok);
+  pend = (j['transfers'] as List);
+  final s1row = pend.where((e) => (e as Map)['id'] == tS1).toList();
+  check('pending has manual tS1', s1row.isNotEmpty, '$pend');
+  if (s1row.isNotEmpty) {
+    final m = s1row.first as Map;
+    check('manual source raw', m['sourceWarehouseId'] == whRaw, '$m');
+    check('manual dest prod', m['destWarehouseId'] == whProd, '$m');
+  }
+
+  (s, _) = await call('POST', '/transfers/$tS1/confirm', tokenStr: adminTok);
+  check('manual confirm 200', s == 200, 'status=$s');
+  prodBal = await balance(c, whProd, 'raw', iRaw);
+  check('prod raw +10 confirm 84->94', prodBal == 94, 'prod=$prodBal');
+
+  // Ruxsat etilmagan yo'nalish (Xom-ashyo -> Sotuv)
+  (s, j) = await call('POST', '/transfers/send',
+      body: {
+        'item_id': iRaw, 'quantity': 1,
+        'source_warehouse_id': whRaw, 'dest_warehouse_id': whSales,
+      },
+      tokenStr: adminTok);
+  check('raw->sales route 403', s == 403, 'status=$s $j');
+
+  // Rad etish -> manbaga qaytadi
+  (s, j) = await call('POST', '/transfers/send',
+      body: {
+        'item_id': iRaw, 'quantity': 5, 'unit': 'kg',
+        'source_warehouse_id': whRaw, 'dest_warehouse_id': whProd,
+      },
+      tokenStr: adminTok);
+  final tS2 = (j['transferId'] as num?)?.toInt();
+  rawBalRaw = await balance(c, whRaw, 'raw', iRaw);
+  check('raw 35->30', rawBalRaw == 30, 'raw=$rawBalRaw');
+  (s, _) = await call('POST', '/transfers/$tS2/reject',
+      body: {'reason': 'Farqi bor'}, tokenStr: adminTok);
+  check('manual reject 200', s == 200, 'status=$s');
+  rawBalRaw = await balance(c, whRaw, 'raw', iRaw);
+  check('raw qaytadi 30->35', rawBalRaw == 35, 'raw=$rawBalRaw');
+
+  // Etarli emas
+  (s, j) = await call('POST', '/transfers/send',
+      body: {
+        'item_id': iRaw, 'quantity': 9999,
+        'source_warehouse_id': whRaw, 'dest_warehouse_id': whProd,
+      },
+      tokenStr: adminTok);
+  check('manual shortage 422', s == 422, 'status=$s $j');
+
+  // Yetishmayotgan field
+  (s, _) = await call('POST', '/transfers/send',
+      body: {'item_id': iRaw, 'quantity': 1, 'source_warehouse_id': whRaw},
+      tokenStr: adminTok);
+  check('manual missing dest 400', s == 400, 'status=$s');
+
+  // Keeper: ruxsat berilmagan manbadan yuborish -> 403
+  (s, _) = await call('POST', '/transfers/send',
+      body: {
+        'item_id': iRaw, 'quantity': 1,
+        'source_warehouse_id': whRaw, 'dest_warehouse_id': whProd,
+      },
+      tokenStr: keeperToken);
+  check('keeper send un-granted src 403', s == 403, 'status=$s');
+
+  // Keeper: grant berilgan ombordan (semi) yuborish -> 201, admin confirm qiladi.
+  (s, j) = await call('POST', '/transfers/send',
+      body: {
+        'item_id': iSemi, 'quantity': 5, 'unit': 'paket',
+        'source_warehouse_id': whSemi, 'dest_warehouse_id': whFin,
+      },
+      tokenStr: keeperToken);
+  check('keeper send granted src 201', s == 201, 'status=$s $j');
+  final tS3 = (j['transferId'] as num?)?.toInt();
+  semiBal = await balance(c, whSemi, 'semi_finished', iSemi);
+  check('keeper send drains semi -5', semiBal == 78, 'semi=$semiBal');
+  (s, _) = await call('POST', '/transfers/$tS3/confirm', tokenStr: adminTok);
+  check('confirm keeper-sent 200', s == 200, 'status=$s');
+  final semiAtFin = await balance(c, whFin, 'semi_finished', iSemi);
+  check('semi +5 to whFin on confirm (keeper sent)', semiAtFin == 5, 'semiAtFin=$semiAtFin');
 
   // ── FINAL ──────────────────────────────────────────────────────────────
   await cleanup();

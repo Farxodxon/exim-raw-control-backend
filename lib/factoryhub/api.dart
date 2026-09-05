@@ -1757,6 +1757,130 @@ get('/transfers', (Request request) async {
       }
     });
 
+    // POST /transfers/send — qo'lda yuborish (qabul qiluvchi tasdiqlashini kutadi).
+    //   body: { item_id, quantity, unit?, source_warehouse_id, dest_warehouse_id, note? }
+    // Manba ombor qoldig'idan DARHOL ayiriladi, qabul qiluvchi omborga esa
+    // faqat "Qabul qildim" bosilgach qo'shiladi. Yo'nalish fh.warehouse_transfer_routes
+    // orqali tekshiriladi.
+    post('/transfers/send', (Request request) async {
+      final role = _role(request);
+      if (!Policy.canTransactStock(role)) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final itemId = body['item_id'] as int?;
+        final qty = (body['quantity'] as num?)?.toDouble();
+        final unit = body['unit'] as String?;
+        final srcId = body['source_warehouse_id'] as int?;
+        final destId = body['dest_warehouse_id'] as int?;
+        final note = body['note'] as String?;
+        if (itemId == null || qty == null || qty <= 0 || srcId == null || destId == null) {
+          return _json({
+            'error': 'item_id, quantity (>0), source_warehouse_id, dest_warehouse_id majburiy'
+          }, status: 400);
+        }
+        if (srcId == destId) {
+          return _json({'error': "Jo'natuvchi va qabul qiluvchi ombor bir xil"}, status: 400);
+        }
+        final uid = _uid(request);
+
+        if (!_grantedWhContains(request, srcId)) {
+          return _json({'error': "Jo'natuvchi omborga kirish ruxsati yo'q"}, status: 403);
+        }
+
+        final db = await DatabaseConnection.getConnection();
+        final wh = await db.execute(
+          'SELECT id, name, type FROM fh.warehouses WHERE id IN (\$1, \$2) AND is_active',
+          parameters: [srcId, destId],
+        );
+        if (wh.length < 2) return _json({'error': 'Ombor topilmadi'}, status: 404);
+        String whName(int id) {
+          for (final r in wh) {
+            if (r[0] == id) return (r[1] as String?) ?? '';
+          }
+          return '';
+        }
+
+        // Ruxsat etilgan yo'nalish (warehouse_transfer_routes).
+        final route = await db.execute(
+          'SELECT 1 FROM fh.warehouse_transfer_routes '
+          'WHERE from_warehouse_id = \$1 AND to_warehouse_id = \$2',
+          parameters: [srcId, destId],
+        );
+        if (route.isEmpty) {
+          return _json({
+            'error': 'Bu yo\'nalishga transfer ruxsat etilmagan. Ombor sozlamalarida transfer yo\'nalishini qo\'shing'
+          }, status: 403);
+        }
+
+        final item = await _itemBrief(db, itemId);
+        if (item == null) return _json({'error': 'Mahsulot topilmadi'}, status: 404);
+        final itemType = (item['itemType'] as String?) ?? 'item';
+        final name = item['name'];
+        final useUnit = (unit == null || unit.isEmpty) ? (item['unit'] ?? 'dona') : unit;
+
+        // Yetarlilik (qo'lda chiqim nazorati bilan bir xil aniqlik).
+        final balRow = await db.execute(
+          '''
+          SELECT COALESCE(SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END), 0)
+          FROM fh.stock_ledger
+          WHERE warehouse_id = \$1 AND item_type = \$2
+            AND COALESCE(ref_id::text, ref_barcode) = \$3::int::text
+          ''',
+          parameters: [srcId, itemType, itemId],
+        );
+        final available = double.parse(balRow.first[0].toString());
+        if (available < qty - 0.0001) {
+          return _json({
+            'error': 'Omborda yetarli qoldiq yo\'q',
+            'available': available,
+          }, status: 422);
+        }
+
+        await db.execute('BEGIN');
+        try {
+          final tr = await db.execute(
+            'INSERT INTO fh.stock_transfers '
+            '(item_id, quantity, unit, source_warehouse_id, dest_warehouse_id, '
+            ' status, created_by) '
+            'VALUES (\$1, \$2, \$3, \$4, \$5, \'pending\', \$6) RETURNING id',
+            parameters: [itemId, qty, useUnit, srcId, destId, uid],
+          );
+          final transferId = tr.first[0];
+
+          // Chiqim DARHOL yoziladi — qabul qiluvchi tasdiqlaguncha qaytib kelmaydi.
+          await db.execute(
+            '''
+            INSERT INTO fh.stock_ledger
+              (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+               direction, qty, source_type, source_ref, performed_by, note)
+            VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'out', \$6, 'transfer_out', \$7::text, \$8, \$9)
+            ''',
+            parameters: [
+              srcId, itemType, itemId, name, useUnit, qty, transferId, uid,
+              note ?? 'Transfer #$transferId',
+            ],
+          );
+
+          await db.execute('COMMIT');
+          return _json({
+            'message': 'Yuborildi. Qabul qiluvchi ombor tasdiqlashini kutmoqda.',
+            'transferId': transferId,
+            'pending': true,
+            'sourceWarehouseName': whName(srcId),
+            'destWarehouseName': whName(destId),
+          }, status: 201);
+        } catch (e) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('transfers/send xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
     // GET /transfers/pending — qabul qiluvchi ombor bo'yicha kutilayotgan o'tkazmalar
     get('/transfers/pending', (Request request) async {
       try {
@@ -3284,8 +3408,8 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             'INSERT INTO fh.stock_transfers '
             '(item_id, quantity, unit, source_warehouse_id, dest_warehouse_id, '
             ' production_batch_id, status, created_by) '
-            'VALUES (\$1, \$2, \$3, NULL, \$4, \$5, \'pending\', \$6) RETURNING id',
-            parameters: [outItemId, outputQty, outUnit, dstId, batchId, uid],
+            'VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \'pending\', \$7) RETURNING id',
+            parameters: [outItemId, outputQty, outUnit, srcId, dstId, batchId, uid],
           );
           final transferId = tr.first[0];
 
@@ -3453,6 +3577,8 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         if (semiId == null || pkgId == null) {
           return _json({'error': 'Yarim tayyor yoki qadoqlash materiallari ombori belgilanmagan'}, status: 422);
         }
+        final srcName = (await db.execute(
+          'SELECT name FROM fh.warehouses WHERE id = \$1', parameters: [semiId])).first[0] as String;
 
         final items = await db.execute(
           'SELECT item_type, ref_id, ref_barcode, name_snapshot, unit, qty FROM fh.bom_items WHERE bom_id = \$1 ORDER BY id',
@@ -3521,8 +3647,8 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             'INSERT INTO fh.stock_transfers '
             '(item_id, quantity, unit, source_warehouse_id, dest_warehouse_id, '
             ' production_batch_id, status, created_by) '
-            'VALUES (\$1, \$2, \$3, NULL, \$4, \$5, \'pending\', \$6) RETURNING id',
-            parameters: [outItemId, outputQty, outUnit, destWarehouseId, batchId, uid],
+            'VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \'pending\', \$7) RETURNING id',
+            parameters: [outItemId, outputQty, outUnit, semiId, destWarehouseId, batchId, uid],
           );
           final transferId = tr.first[0];
 
@@ -3537,6 +3663,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             'outputItemName': outItem['name'],
             'outputQty': outputQty,
             'outputUnit': outUnit,
+            'sourceWarehouseName': srcName,
             'destWarehouseName': dstName,
             'pending': true,
           }, status: 201);
@@ -3657,11 +3784,12 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         final item = await _itemBrief(db, itemId) ?? <String, dynamic>{'name': 'Mahsulot'};
         final uid = _uid(request);
 
-        // Rad etilgan miqdor qayerga: manba bor bo'lsa manbaga,
-        // ishlab chiqarish/qadoqlash natijasi bo'lsa Brak/nikoz omboriga.
+        // Rad etilgan miqdor qayerga: qo'lda yuborilgan (production_batch_id=null)
+        // manba omboriga qaytadi; ishlab chiqarish/qadoqlash natijasi bo'lsa
+        // Brak/nikoz omboriga tushadi.
         int? reverseDestId = srcId;
         String reverseType = 'reject_reverse';
-        if (srcId == null) {
+        if (batchId != null) {
           reverseDestId = await _defaultWarehouseId(db, 'defective');
           if (reverseDestId == null) {
             return _json({'error': 'Brak/nikoz ombori topilmadi'}, status: 422);
