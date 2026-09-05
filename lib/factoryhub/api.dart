@@ -125,7 +125,7 @@ Future<Map<String, dynamic>?> _resolveItem(
       '''
       SELECT item_type, MAX(name_snapshot), MAX(unit), MAX(ref_id), MAX(ref_barcode)
       FROM fh.stock_ledger
-      WHERE warehouse_id = \$1 AND COALESCE(ref_id::text, ref_barcode) = \$2::int::text
+      WHERE warehouse_id = \$1 AND COALESCE(ref_id::text, ref_barcode) = \$2::text
       GROUP BY item_type
       ''',
       parameters: [srcWhId, itemId],
@@ -1464,7 +1464,7 @@ if (!_grantedWhContains(request, warehouseId)) {
             SELECT COALESCE(SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END), 0)
             FROM fh.stock_ledger
             WHERE warehouse_id = \$1 AND item_type = \$2
-              AND COALESCE(ref_id::text, ref_barcode) = COALESCE(\$3::int::text, \$4)
+              AND COALESCE(ref_id::text, ref_barcode) = COALESCE(\$3::text, \$4)
             ''',
             parameters: [warehouseId, itemType, refId, refBarcode],
           );
@@ -1858,7 +1858,7 @@ get('/transfers', (Request request) async {
           SELECT COALESCE(SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END), 0)
           FROM fh.stock_ledger
           WHERE warehouse_id = \$1 AND item_type = \$2
-            AND COALESCE(ref_id::text, ref_barcode) = \$3::int::text
+            AND COALESCE(ref_id::text, ref_barcode) = \$3::text
           ''',
           parameters: [srcId, itemType, itemId],
         );
