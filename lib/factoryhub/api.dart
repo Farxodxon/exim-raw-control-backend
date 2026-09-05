@@ -1801,7 +1801,6 @@ get('/transfers', (Request request) async {
         final unit = body['unit'] as String?;
         final srcId = body['source_warehouse_id'] as int?;
         final destId = body['dest_warehouse_id'] as int?;
-        final note = body['note'] as String?;
         if (itemId == null || qty == null || qty <= 0 || srcId == null || destId == null) {
           return _json({
             'error': 'item_id, quantity (>0), source_warehouse_id, dest_warehouse_id majburiy'
@@ -1844,7 +1843,6 @@ get('/transfers', (Request request) async {
         final item = await _resolveItem(db, itemId, srcId);
         if (item == null) return _json({'error': 'Mahsulot topilmadi'}, status: 404);
         final itemType = (item['itemType'] as String?) ?? 'item';
-        final name = item['name'] ?? 'Mahsulot';
         final useUnit = (unit == null || unit.isEmpty)
             ? ((item['unit'] as String?) ?? 'dona')
             : unit;
@@ -1878,19 +1876,9 @@ get('/transfers', (Request request) async {
           );
           final transferId = tr.first[0];
 
-          // Chiqim DARHOL yoziladi — qabul qiluvchi tasdiqlaguncha qaytib kelmaydi.
-          await db.execute(
-            '''
-            INSERT INTO fh.stock_ledger
-              (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
-               direction, qty, source_type, source_ref, performed_by, note)
-            VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'out', \$6, 'transfer_out', \$7::text, \$8, \$9)
-            ''',
-            parameters: [
-              srcId, itemType, itemId, name, useUnit, qty, transferId, uid,
-              note ?? 'Transfer #$transferId',
-            ],
-          );
+          // Chiqim YOZILMAYDI — manba ombor qoldig'i faqat qabul qiluvchi
+          // ombor "Qabul qildim" (confirm) bosganda kamayadi. Pending paytida
+          // ikkala ombor ham o'zgarmaydi.
 
           await db.execute('COMMIT');
           return _json({
@@ -3806,6 +3794,30 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
 
         await db.execute('BEGIN');
         try {
+          // Qo'lda (batchsiz) o'tkazmalarda manba chiqimi faqat confirm vaqtida
+          // yoziladi — send balansga tegmaydi. Eski qoidalar bilan yuborilgan
+          // o'tkazmalarda chiqim allaqachon bor, qayta yozilmaydi.
+          if (batchId == null && srcId != null) {
+            final outExists = await db.execute(
+              "SELECT 1 FROM fh.stock_ledger WHERE warehouse_id = \$1 AND source_ref = \$2::text "
+              "AND direction = 'out' AND source_type = 'transfer_out' LIMIT 1",
+              parameters: [srcId, transferId],
+            );
+            if (outExists.isEmpty) {
+              await db.execute(
+                '''
+                INSERT INTO fh.stock_ledger
+                  (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+                   direction, qty, source_type, source_ref, performed_by, note)
+                VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'out', \$6, 'transfer_out', \$7::text, \$8, \$9)
+                ''',
+                parameters: [
+                  srcId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit,
+                  qty, transferId, uid, 'Transfer #$transferId',
+                ],
+              );
+            }
+          }
           await db.execute(
             '''
             INSERT INTO fh.stock_ledger
@@ -3891,18 +3903,43 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
 
         await db.execute('BEGIN');
         try {
-          await db.execute(
-            '''
-            INSERT INTO fh.stock_ledger
-              (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
-               direction, qty, source_type, source_ref, performed_by, note)
-            VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'in', \$6, \$7, \$8::text, \$9, \$10)
-            ''',
-            parameters: [
-              reverseDestId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit, qty,
-              reverseType, transferId, uid, 'Rad etildi: $reason',
-            ],
-          );
+          // Qo'lda (batchsiz) o'tkazmalarda chiqim send paytida yozilmasa,
+          // rad etish hech narsani qaytarmaydi. Eski qoidalar bilan yuborilgan
+          // (chiqim send'da bor) o'tkazmalar rad etilganda manbaga qaytadi.
+          if (batchId != null) {
+            await db.execute(
+              '''
+              INSERT INTO fh.stock_ledger
+                (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+                 direction, qty, source_type, source_ref, performed_by, note)
+              VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'in', \$6, \$7, \$8::text, \$9, \$10)
+              ''',
+              parameters: [
+                reverseDestId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit, qty,
+                reverseType, transferId, uid, 'Rad etildi: $reason',
+              ],
+            );
+          } else if (srcId != null) {
+            final outExists = await db.execute(
+              "SELECT 1 FROM fh.stock_ledger WHERE warehouse_id = \$1 AND source_ref = \$2::text "
+              "AND direction = 'out' AND source_type = 'transfer_out' LIMIT 1",
+              parameters: [srcId, transferId],
+            );
+            if (outExists.isNotEmpty) {
+              await db.execute(
+                '''
+                INSERT INTO fh.stock_ledger
+                  (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+                   direction, qty, source_type, source_ref, performed_by, note)
+                VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'in', \$6, 'reject_reverse', \$7::text, \$8, \$9)
+                ''',
+                parameters: [
+                  reverseDestId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit, qty,
+                  transferId, uid, 'Rad etildi: $reason',
+                ],
+              );
+            }
+          }
           await db.execute(
             'UPDATE fh.stock_transfers SET status = \'rejected\', reject_reason = \$1, '
             'confirmed_by = \$2, confirmed_at = now() WHERE id = \$3',

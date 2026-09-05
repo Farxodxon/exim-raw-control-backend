@@ -109,6 +109,9 @@ Future<void> main() async {
   var balA = await ledBal(c, whA, refText, 'raw_material');
   chk('seed balance 10', balA == 10, 'bal=$balA');
 
+  var balB = await ledBal(c, whB, refText, 'raw_material');
+  chk('dest 0 boshlanishda', balB == 0, 'bal=$balB');
+
   var (s, j) = await call('POST', '/transfers/send', {
     'item_id': refId, 'quantity': 2, 'unit': 'kg',
     'source_warehouse_id': whA, 'dest_warehouse_id': whB, 'note': 'legacy test',
@@ -118,7 +121,7 @@ Future<void> main() async {
   final t1 = (j['transferId'] as num).toInt();
 
   balA = await ledBal(c, whA, refText, 'raw_material');
-  chk('source deducted to 8', balA == 8, 'bal=$balA');
+  chk('source senddan keyin o\'zgarmaydi 10', balA == 10, 'bal=$balA');
 
   (s, j) = await call('GET', '/transfers/pending?warehouse_id=$whB', null, tokenStr);
   final pend = ((j['transfers'] as List?) ?? []).where((e) => e['id'] == t1).toList();
@@ -127,12 +130,12 @@ Future<void> main() async {
   (s, j) = await call('POST', '/transfers/$t1/confirm', {}, tokenStr);
   chk('confirm 200', s == 200, 's=$s $j');
 
-  final balB = await ledBal(c, whB, refText, 'raw_material');
-  chk('dest received +2', balB == 2, 'bal=$balB');
+  balB = await ledBal(c, whB, refText, 'raw_material');
+  chk('dest confirmda +2', balB == 2, 'bal=$balB');
   balA = await ledBal(c, whA, refText, 'raw_material');
-  chk('source still 8', balA == 8, 'bal=$balA');
+  chk('source confirmda 10->8', balA == 8, 'bal=$balA');
 
-  // Reject tarmog'i: yana bitta send, rad etish → manba omboriga qaytadi.
+  // Reject tarmog'i: send balansga tegmaydi, reject ham.
   (s, j) = await call('POST', '/transfers/send', {
     'item_id': refId, 'quantity': 3, 'unit': 'kg',
     'source_warehouse_id': whA, 'dest_warehouse_id': whB, 'note': 'legacy reject test',
@@ -140,13 +143,16 @@ Future<void> main() async {
   chk('send2 201', s == 201, 's=$s $j');
   final t2 = (j['transferId'] as num).toInt();
 
+  balA = await ledBal(c, whA, refText, 'raw_material');
+  chk('send2 source o\'zgarmaydi 8', balA == 8, 'bal=$balA');
+
   (s, j) = await call('POST', '/transfers/$t2/reject', {'reason': 'noto\'g\'ri miqdor'}, tokenStr);
   chk('reject 200', s == 200, 's=$s $j');
 
   balA = await ledBal(c, whA, refText, 'raw_material');
-  chk('source after reject 8', balA == 8, 'bal=$balA');
-  final balB2 = await ledBal(c, whB, refText, 'raw_material');
-  chk('dest unchanged 2', balB2 == 2, 'bal=$balB2');
+  chk('source rejectdan keyin ham 8', balA == 8, 'bal=$balA');
+  balB = await ledBal(c, whB, refText, 'raw_material');
+  chk('dest unchanged 2', balB == 2, 'bal=$balB');
 
   // Tozalash
   await c.execute("DELETE FROM fh.stock_ledger WHERE name_snapshot = \$1", parameters: [SN]);

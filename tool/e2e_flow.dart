@@ -343,13 +343,20 @@ Future<void> main() async {
       "VALUES (\$1, 5, 'paket', \$2, \$3, 'pending', \$4) RETURNING id",
       parameters: [iSemi, whSemi, whQuar, adminId]);
   final tS = (trS.first[0] as num).toInt();
+  // Eski qoidalar bilan yuborilgan o'tkazmalar send paytida manba chiqimini
+  // yozgan edi — rad etilganda manbaga qaytishini simulyatsiya qilamiz.
+  await c.execute(
+      "INSERT INTO fh.stock_ledger (warehouse_id, item_type, ref_id, name_snapshot, unit, "
+      "direction, qty, source_type, source_ref, performed_by, note) "
+      "VALUES (\$1, 'semi_finished', \$2, 'E2E Yarim tayyor', 'paket', 'out', 5, 'transfer_out', \$3::text, \$4, 'Transfer #\$3')",
+      parameters: [whSemi, iSemi, tS, adminId]);
   semiBal = await balance(c, whSemi, 'semi_finished', iSemi);
-  check('semi before reverse 58', semiBal == 58, 'semi=$semiBal');
+  check('semi before reverse 53', semiBal == 53, 'semi=$semiBal');
   (s, _) = await call('POST', '/transfers/$tS/reject',
       body: {'reason': 'Qaytarildi'}, tokenStr: adminTok);
   check('reverse reject 200', s == 200, 'status=$s');
   semiBal = await balance(c, whSemi, 'semi_finished', iSemi);
-  check('reverse back to semi 58->63', semiBal == 63, 'semi=$semiBal');
+  check('ledger chiqim +5 qaytadi 53->58', semiBal == 58, 'semi=$semiBal');
 
   // ── 6. INSPECTIONS ──────────────────────────────────────────────────────
   (s, j) = await call('POST', '/inspections/receive',
@@ -438,7 +445,7 @@ Future<void> main() async {
   (s, _) = await call('POST', '/transfers/$t4/confirm', tokenStr: keeperToken);
   check('keeper confirm t4 200', s == 200, 'status=$s');
   semiBal = await balance(c, whSemi, 'semi_finished', iSemi);
-  check('keeper confirm added semi 63->73', semiBal == 73, 'semi=$semiBal');
+  check('keeper confirm added semi 58->68', semiBal == 68, 'semi=$semiBal');
   (s, _) = await call('POST', '/transfers/$t4/confirm', tokenStr: keeperToken);
   check('keeper confirm again 409', s == 409, 'status=$s');
 
@@ -497,7 +504,7 @@ Future<void> main() async {
   check('manual source filled', srcRow.isNotEmpty && (srcRow.first[0] as num).toInt() == whRaw, '$srcRow');
 
   rawBalRaw = await balance(c, whRaw, 'raw', iRaw);
-  check('raw darhol 45->35', rawBalRaw == 35, 'raw=$rawBalRaw');
+  check('raw senddan keyin o\'zgarmaydi 45 (confirm kutiladi)', rawBalRaw == 45, 'raw=$rawBalRaw');
   var prodBal = await balance(c, whProd, 'raw', iRaw);
   check('prod o\'zgarishsiz 84 (confirm kutiladi)', prodBal == 84, 'prod=$prodBal');
 
@@ -515,6 +522,8 @@ Future<void> main() async {
   check('manual confirm 200', s == 200, 'status=$s');
   prodBal = await balance(c, whProd, 'raw', iRaw);
   check('prod raw +10 confirm 84->94', prodBal == 94, 'prod=$prodBal');
+  rawBalRaw = await balance(c, whRaw, 'raw', iRaw);
+  check('raw confirmda kamayadi 45->35', rawBalRaw == 35, 'raw=$rawBalRaw');
 
   // Ruxsat etilmagan yo'nalish (Xom-ashyo -> Sotuv)
   (s, j) = await call('POST', '/transfers/send',
@@ -534,12 +543,12 @@ Future<void> main() async {
       tokenStr: adminTok);
   final tS2 = (j['transferId'] as num?)?.toInt();
   rawBalRaw = await balance(c, whRaw, 'raw', iRaw);
-  check('raw 35->30', rawBalRaw == 30, 'raw=$rawBalRaw');
+  check('raw send2 o\'zgarmaydi 35', rawBalRaw == 35, 'raw=$rawBalRaw');
   (s, _) = await call('POST', '/transfers/$tS2/reject',
       body: {'reason': 'Farqi bor'}, tokenStr: adminTok);
   check('manual reject 200', s == 200, 'status=$s');
   rawBalRaw = await balance(c, whRaw, 'raw', iRaw);
-  check('raw qaytadi 30->35', rawBalRaw == 35, 'raw=$rawBalRaw');
+  check('raw rejectdan keyin ham 35', rawBalRaw == 35, 'raw=$rawBalRaw');
 
   // Etarli emas
   (s, j) = await call('POST', '/transfers/send',
@@ -575,11 +584,13 @@ Future<void> main() async {
   check('keeper send granted src 201', s == 201, 'status=$s $j');
   final tS3 = (j['transferId'] as num?)?.toInt();
   semiBal = await balance(c, whSemi, 'semi_finished', iSemi);
-  check('keeper send drains semi -5', semiBal == 78, 'semi=$semiBal');
+  check('keeper send semi o\'zgarmaydi 78', semiBal == 78, 'semi=$semiBal');
   (s, _) = await call('POST', '/transfers/$tS3/confirm', tokenStr: adminTok);
   check('confirm keeper-sent 200', s == 200, 'status=$s');
   final semiAtFin = await balance(c, whFin, 'semi_finished', iSemi);
   check('semi +5 to whFin on confirm (keeper sent)', semiAtFin == 5, 'semiAtFin=$semiAtFin');
+  semiBal = await balance(c, whSemi, 'semi_finished', iSemi);
+  check('semi confirmda 78->73', semiBal == 73, 'semi=$semiBal');
 
   // ── FINAL ──────────────────────────────────────────────────────────────
   await cleanup();
