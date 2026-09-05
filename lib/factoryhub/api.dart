@@ -32,6 +32,48 @@ String _role(Request request) => (_user(request)['role'] ?? '') as String;
 
 int? _uid(Request request) => _user(request)['user_id'] as int?;
 
+bool _fullAccess(String role) => Policy.canViewAllWarehouses(role);
+
+// Foydalanuvchiga biriktirilgan omborlar (admin/director uchun ishlatilmaydi).
+Future<Set<int>> _grantedWarehouseIds(int uid) async {
+  if (uid <= 0) return <int>{};
+  final db = await DatabaseConnection.getConnection();
+  final res = await db.execute(
+    'SELECT warehouse_id FROM fh.user_warehouses WHERE user_id = \$1',
+    parameters: [uid],
+  );
+  return res.map((r) => (r[0] as num).toInt()).toSet();
+}
+
+// Foydalanuvchiga biriktirilgan modullar (admin/director uchun ishlatilmaydi).
+Future<Set<String>> _grantedModuleKeys(int uid) async {
+  if (uid <= 0) return <String>{};
+  final db = await DatabaseConnection.getConnection();
+  final res = await db.execute(
+    'SELECT module_key FROM fh.user_modules WHERE user_id = \$1',
+    parameters: [uid],
+  );
+  return res.map((r) => r[0] as String).toSet();
+}
+
+// Path prefiksinga mos keluvchi modul kaliti.
+String? _moduleKeyForPath(String path) {
+  if (path.startsWith('hr/')) return 'hr';
+  if (path.startsWith('plans') || path.startsWith('production/')) {
+    return 'production_planning';
+  }
+  if (path.startsWith('supplier-orders')) return 'supplier_orders';
+  if (path.startsWith('users') || path.startsWith('admin/')) return 'user_management';
+  if (path.startsWith('thresholds')) return 'admin_settings';
+  return null;
+}
+
+// Restricted foydalanuvchi uchun omborga ruxsat bormi?
+bool _grantedWhContains(Request request, int id) {
+  if (_fullAccess(_role(request))) return true;
+  return ((request.context['fh_wh'] as Set<int>?) ?? <int>{}).contains(id);
+}
+
 void _buildSheet(Excel excel, String sheetName, List<dynamic> rows, String direction, String from, String to) {
   final sheet = excel[sheetName];
 
@@ -95,13 +137,49 @@ final payload = FhJwt.getUserFromToken(authHeader);
     }
 
     final role = payload['role'] as String? ?? '';
-    if (role == AppRoles.hrManager) {
-      final isHrPath = path.startsWith('hr/');
-      final isAllowed =
-          isHrPath || path == 'dashboard/summary' || path == 'alerts';
-      if (!isAllowed) {
-        return _json({'error': 'Ruxsat yoq'}, status: 403);
+    final uid = payload['user_id'] as int?;
+
+    // Modul-va-omborga asoslangan ruxsatlar.
+    // Admin/director — to'liq kirish; qolganlar faqat biriktirilgan
+    // omborlar (user_warehouses) va modullar (user_modules) bo'yicha.
+    if (role != AppRoles.admin &&
+        role != AppRoles.director &&
+        uid != null &&
+        path != 'auth/my-access') {
+      final whGranted = await _grantedWarehouseIds(uid);
+      final modGranted = await _grantedModuleKeys(uid);
+
+      // warehouse_id query parametri — biriktirilgan omborda bo'lishi shart.
+      final qwh = int.tryParse(request.url.queryParameters['warehouse_id'] ?? '');
+      if (qwh != null && !whGranted.contains(qwh)) {
+        return _json({'error': 'Bu omborga kirish ruxsati yo\'q'}, status: 403);
       }
+
+      // /warehouses/<id>... — path'dagi ombor ID sini tekshirish.
+      final whPath = RegExp(r'^warehouses/(\d+)').firstMatch(path);
+      if (whPath != null) {
+        final wid = int.tryParse(whPath.group(1)!);
+        if (wid == null || !whGranted.contains(wid)) {
+          return _json({'error': 'Bu omborga kirish ruxsati yo\'q'}, status: 403);
+        }
+      }
+
+      // Modul path'lar — grant bo'lishi shart.
+      final mk = _moduleKeyForPath(path);
+      if (mk != null && !modGranted.contains(mk)) {
+        return _json({'error': 'Bu bo\'limga kirish ruxsati yo\'q'}, status: 403);
+      }
+
+      // Hisobotlar ombor bilan bog'liq — ombori bo'lmagan foydalanuvchiga yopiq.
+      if (path.startsWith('reports/') && whGranted.isEmpty) {
+        return _json({'error': 'Ruxsat yo\'q'}, status: 403);
+      }
+
+      return innerHandler(request.change(context: {
+        'fh_user': payload,
+        'fh_wh': whGranted,
+        'fh_modules': modGranted,
+      }));
     }
 
     return innerHandler(request.change(context: {'fh_user': payload}));
@@ -145,7 +223,7 @@ extension _FhRoutes on Router {
       }
     });
 
-    post('/setup', (Request request) async {
+post('/setup', (Request request) async {
       try {
         final body = await _body(request);
         final username = body['username'] as String?;
@@ -171,6 +249,230 @@ extension _FhRoutes on Router {
         return _json({'message': 'Admin yaratildi', 'user': user.toJson()}, status: 201);
       } catch (e) {
         return _json({'error': 'Xatolik: $e'}, status: 400);
+      }
+    });
+
+    // ---------- MY ACCESS ----------
+    // Joriy foydalanuvchining omborlar va modullar bo'yicha kirish ma'lumoti.
+    get('/auth/my-access', (Request request) async {
+      try {
+        final role = _role(request);
+        final uid = _uid(request);
+        final db = await DatabaseConnection.getConnection();
+        final full = _fullAccess(role);
+
+        if (full) {
+          final wh = await db.execute(
+            'SELECT id, name, type FROM fh.warehouses WHERE is_active = true ORDER BY id');
+          final md = await db.execute(
+            'SELECT module_key, name_uz, category FROM fh.app_modules '
+            'WHERE is_active = true ORDER BY sort_order');
+          return _json({
+            'role': role,
+            'is_full_access': true,
+            'warehouses': wh
+                .map((r) => {'id': r[0], 'name': r[1], 'type': r[2]})
+                .toList(),
+            'modules': md
+                .map((r) => {'module_key': r[0], 'name_uz': r[1], 'category': r[2]})
+                .toList(),
+          });
+        }
+
+        final wh = uid == null
+            ? <Map<String, dynamic>>[]
+            : await db.execute(
+                  'SELECT w.id, w.name, w.type FROM fh.user_warehouses uw '
+                  'JOIN fh.warehouses w ON w.id = uw.warehouse_id '
+                  'WHERE uw.user_id = \$1 AND w.is_active = true ORDER BY w.id',
+                  parameters: [uid],
+                );
+        final md = uid == null
+            ? <Map<String, dynamic>>[]
+            : await db.execute(
+                  'SELECT m.module_key, m.name_uz, m.category FROM fh.user_modules um '
+                  'JOIN fh.app_modules m ON m.module_key = um.module_key '
+                  'WHERE um.user_id = \$1 AND m.is_active = true ORDER BY m.sort_order',
+                  parameters: [uid],
+                );
+        return _json({
+          'role': role,
+          'is_full_access': false,
+          'warehouses': (wh as List)
+              .map((r) => {'id': r[0], 'name': r[1], 'type': r[2]})
+              .toList(),
+          'modules': (md as List)
+              .map((r) => {'module_key': r[0], 'name_uz': r[1], 'category': r[2]})
+              .toList(),
+        });
+      } catch (e) {
+        print('my-access xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- ADMIN: foydalanuvchi kirish huquqlarini boshqarish ----------
+    get('/admin/modules', (Request request) async {
+      if (!Policy.canManageUsers(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final md = await db.execute(
+          'SELECT module_key, name_uz, category, sort_order, is_active '
+          'FROM fh.app_modules ORDER BY sort_order');
+        return _json({
+          'modules': md
+              .map((r) => {
+                'module_key': r[0],
+                'name_uz': r[1],
+                'category': r[2],
+                'sort_order': r[3],
+                'is_active': r[4],
+              })
+              .toList(),
+        });
+      } catch (e) {
+        print('admin/modules xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    get('/admin/users/<id>/access', (Request request, String id) async {
+      if (!Policy.canManageUsers(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final userId = int.tryParse(id);
+      if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final wh = await db.execute(
+          'SELECT w.id, w.name, w.type FROM fh.user_warehouses uw '
+          'JOIN fh.warehouses w ON w.id = uw.warehouse_id '
+          'WHERE uw.user_id = \$1 ORDER BY w.id',
+          parameters: [userId],
+        );
+        final md = await db.execute(
+          'SELECT m.module_key, m.name_uz, m.category FROM fh.user_modules um '
+          'JOIN fh.app_modules m ON m.module_key = um.module_key '
+          'WHERE um.user_id = \$1 ORDER BY m.sort_order',
+          parameters: [userId],
+        );
+        return _json({
+          'warehouses': wh
+              .map((r) => {'id': r[0], 'name': r[1], 'type': r[2]})
+              .toList(),
+          'modules': md
+              .map((r) => {'module_key': r[0], 'name_uz': r[1], 'category': r[2]})
+              .toList(),
+        });
+      } catch (e) {
+        print('admin/users/access GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/admin/users/<id>/warehouses', (Request request, String id) async {
+      if (!Policy.canManageUsers(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final userId = int.tryParse(id);
+      if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+      try {
+        final body = await _body(request);
+        final warehouseId = body['warehouse_id'] as int?;
+        if (warehouseId == null) {
+          return _json({'error': 'warehouse_id majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        final exists = await db.execute(
+          'SELECT 1 FROM fh.warehouses WHERE id = \$1', parameters: [warehouseId]);
+        if (exists.isEmpty) {
+          return _json({'error': 'Ombor topilmadi'}, status: 404);
+        }
+        await db.execute(
+          'INSERT INTO fh.user_warehouses (user_id, warehouse_id, granted_by) '
+          'VALUES (\$1, \$2, \$3) ON CONFLICT (user_id, warehouse_id) DO NOTHING',
+          parameters: [userId, warehouseId, _uid(request)],
+        );
+        return _json({'message': 'Ombor biriktirildi'}, status: 201);
+      } catch (e) {
+        print('admin/users/warehouses POST xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    delete('/admin/users/<id>/warehouses/<wid>',
+        (Request request, String id, String wid) async {
+      if (!Policy.canManageUsers(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final userId = int.tryParse(id);
+      final warehouseId = int.tryParse(wid);
+      if (userId == null || warehouseId == null) {
+        return _json({'error': "Noto'g'ri ID"}, status: 400);
+      }
+      try {
+        final db = await DatabaseConnection.getConnection();
+        await db.execute(
+          'DELETE FROM fh.user_warehouses WHERE user_id = \$1 AND warehouse_id = \$2',
+          parameters: [userId, warehouseId],
+        );
+        return _json({'message': 'Ombor ajratildi'});
+      } catch (e) {
+        print('admin/users/warehouses DELETE xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/admin/users/<id>/modules', (Request request, String id) async {
+      if (!Policy.canManageUsers(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final userId = int.tryParse(id);
+      if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+      try {
+        final body = await _body(request);
+        final moduleKey = body['module_key'] as String?;
+        if (moduleKey == null || moduleKey.trim().isEmpty) {
+          return _json({'error': 'module_key majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        final exists = await db.execute(
+          'SELECT 1 FROM fh.app_modules WHERE module_key = \$1',
+          parameters: [moduleKey]);
+        if (exists.isEmpty) {
+          return _json({'error': 'Modul topilmadi'}, status: 404);
+        }
+        await db.execute(
+          'INSERT INTO fh.user_modules (user_id, module_key, granted_by) '
+          'VALUES (\$1, \$2, \$3) ON CONFLICT (user_id, module_key) DO NOTHING',
+          parameters: [userId, moduleKey, _uid(request)],
+        );
+        return _json({'message': 'Modul biriktirildi'}, status: 201);
+      } catch (e) {
+        print('admin/users/modules POST xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    delete('/admin/users/<id>/modules/<mk>',
+        (Request request, String id, String mk) async {
+      if (!Policy.canManageUsers(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final userId = int.tryParse(id);
+      if (userId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+      try {
+        final db = await DatabaseConnection.getConnection();
+        await db.execute(
+          'DELETE FROM fh.user_modules WHERE user_id = \$1 AND module_key = \$2',
+          parameters: [userId, mk],
+        );
+        return _json({'message': 'Modul ajratildi'});
+      } catch (e) {
+        print('admin/users/modules DELETE xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
       }
     });
 
@@ -553,8 +855,8 @@ extension _FhRoutes on Router {
       try {
         final db = await DatabaseConnection.getConnection();
 
-        var result;
-        if (role == AppRoles.warehouseKeeper && userId != null) {
+var result;
+        if (!_fullAccess(role) && userId != null) {
           result = await db.execute(
             '''SELECT w.id, w.name, w.type, w.is_active, w.created_at,
                      w.can_analyze, w.can_transfer, w.can_income, w.can_expense
@@ -969,7 +1271,7 @@ extension _FhRoutes on Router {
       final role = _role(request);
       final userId = _uid(request);
 
-      if (!Policy.canTransactStock(role)) {
+if (!Policy.canTransactStock(role)) {
         return _json({'error': 'Ruxsat yoq'}, status: 403);
       }
 
@@ -990,6 +1292,9 @@ extension _FhRoutes on Router {
             {'error': 'warehouse_id, item_type, direction, qty majburiy'},
             status: 400,
           );
+        }
+if (!_grantedWhContains(request, warehouseId)) {
+          return _json({'error': 'Bu omborga kirish ruxsati yo\'q'}, status: 403);
         }
         if (!allowedTypes.contains(itemType) || !['in', 'out'].contains(direction)) {
           return _json(
@@ -1117,12 +1422,24 @@ extension _FhRoutes on Router {
     });
 
     // ---------- STOCK REPORT ----------
-    get('/stock', (Request request) async {
+get('/stock', (Request request) async {
       try {
         final warehouseId =
             int.tryParse(request.url.queryParameters['warehouse_id'] ?? '');
 
         final db = await DatabaseConnection.getConnection();
+        final restricted = !_fullAccess(_role(request));
+        final grantedWh =
+            restricted ? (request.context['fh_wh'] as Set<int>?) ?? <int>{} : null;
+        if (restricted && grantedWh != null && grantedWh.isEmpty) {
+          return _json({'stock': <dynamic>[], 'total': 0});
+        }
+        var where = '(\$1::int IS NULL OR w.id = \$1)';
+        final params = <dynamic>[warehouseId];
+        if (restricted) {
+          where += ' AND w.id = ANY(\$2)';
+          params.add(grantedWh!.toList());
+        }
         final result = await db.execute(
           '''
           SELECT w.id AS warehouse_id, w.name AS warehouse_name, w.type,
@@ -1140,7 +1457,7 @@ extension _FhRoutes on Router {
           FROM fh.stock_ledger l
           JOIN fh.warehouses w ON w.id = l.warehouse_id
           LEFT JOIN public.raw_materials rm ON rm.id = l.ref_id
-          WHERE (\$1::int IS NULL OR w.id = \$1)
+          WHERE $where
           GROUP BY w.id, w.name, w.type, l.item_type, COALESCE(
                    CASE
                      WHEN l.item_type = 'raw_material' THEN rm.code
@@ -1151,7 +1468,7 @@ extension _FhRoutes on Router {
           HAVING SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) > 0
           ORDER BY w.name, l.item_type
           ''',
-          parameters: [warehouseId],
+          parameters: params,
         );
 
         return _json({
@@ -1186,10 +1503,20 @@ extension _FhRoutes on Router {
         var params = <dynamic>[from, to];
         var idx = 2;
 
-        if (warehouseId != null) {
+if (warehouseId != null) {
           idx++;
           where += ' AND l.warehouse_id = \$$idx';
           params.add(warehouseId);
+        }
+        if (!_fullAccess(_role(request))) {
+          final grantedWh =
+              (request.context['fh_wh'] as Set<int>?) ?? <int>{};
+          if (grantedWh.isEmpty) {
+            return _json({'error': 'Ruxsat yo\'q'}, status: 403);
+          }
+          idx++;
+          where += ' AND l.warehouse_id = ANY(\$$idx)';
+          params.add(grantedWh.toList());
         }
         if (type == 'in' || type == 'out') {
           idx++;
@@ -1351,10 +1678,13 @@ extension _FhRoutes on Router {
     // INTER-WAREHOUSE TRANSFERS
     // ─────────────────────────────────────────────────────────────────────────────
 
-    get('/transfers', (Request request) async {
+get('/transfers', (Request request) async {
       try {
         final db = await DatabaseConnection.getConnection();
-        final result = await db.execute('''
+        final restricted = !_fullAccess(_role(request));
+        final grantedWh =
+            restricted ? (request.context['fh_wh'] as Set<int>?) ?? <int>{} : null;
+        var query = '''
           SELECT t.id, fw.name AS from_name, tw.name AS to_name,
                  t.status, t.note, u.username, t.created_at, t.completed_at,
                  (SELECT COUNT(*) FROM fh.transfer_items ti WHERE ti.transfer_id = t.id) AS item_count,
@@ -1363,8 +1693,14 @@ extension _FhRoutes on Router {
           JOIN fh.warehouses fw ON fw.id = t.from_warehouse_id
           JOIN fh.warehouses tw ON tw.id = t.to_warehouse_id
           LEFT JOIN fh.users u ON u.id = t.created_by
-          ORDER BY t.created_at DESC LIMIT 100
-        ''');
+        ''';
+        final params = <dynamic>[];
+        if (restricted) {
+          query += ' WHERE t.from_warehouse_id = ANY(\$1) OR t.to_warehouse_id = ANY(\$1)';
+          params.add(grantedWh!.toList());
+        }
+        query += ' ORDER BY t.created_at DESC LIMIT 100';
+        final result = await db.execute(query, parameters: params);
         final list = result.map((r) => {
           'id': r[0], 'fromWarehouse': r[1], 'toWarehouse': r[2],
           'status': r[3], 'note': r[4], 'createdBy': r[5],
@@ -1392,8 +1728,17 @@ extension _FhRoutes on Router {
           LEFT JOIN fh.users u ON u.id = t.created_by
           WHERE t.id = \$1
         ''', parameters: [transferId]);
-        if (info.isEmpty) return _json({'error': 'Topilmadi'}, status: 404);
+if (info.isEmpty) return _json({'error': 'Topilmadi'}, status: 404);
         final r = info.first;
+        if (!_fullAccess(_role(request))) {
+          final grantedWh =
+              (request.context['fh_wh'] as Set<int>?) ?? <int>{};
+          final fromId = (r[1] as num).toInt();
+          final toId = (r[3] as num).toInt();
+          if (!grantedWh.contains(fromId) && !grantedWh.contains(toId)) {
+            return _json({'error': 'Ruxsat yo\'q'}, status: 403);
+          }
+        }
         final items = await db.execute('''
           SELECT id, item_type, ref_id, ref_barcode, name_snapshot, unit, qty
           FROM fh.transfer_items WHERE transfer_id = \$1 ORDER BY id
@@ -1494,14 +1839,12 @@ extension _FhRoutes on Router {
               parameters: [transferId, itemType, refId, refBarcode, nameSnapshot, unit, qty],
             );
 
-            if (role == AppRoles.warehouseKeeper && userId != null) {
-              final allowedFrom = await db.execute(
-                'SELECT 1 FROM fh.user_warehouses WHERE user_id = \$1 AND warehouse_id = \$2',
-                parameters: [userId, fromId],
-              );
-              if (allowedFrom.isEmpty) {
+if (!_fullAccess(role) && userId != null) {
+              final grantedWh =
+                  (request.context['fh_wh'] as Set<int>?) ?? <int>{};
+              if (!grantedWh.contains(fromId) || !grantedWh.contains(toId)) {
                 await db.execute('ROLLBACK');
-                return _json({'error': 'Jo\'natuvchi omborga ruxsat yoq'}, status: 403);
+                return _json({'error': 'Omborlarga ruxsat yo\'q'}, status: 403);
               }
             }
 
@@ -2593,11 +2936,14 @@ extension _FhRoutes on Router {
         final qty = (body['qty'] as num?)?.toDouble();
         final reason = body['reason'] as String?;
         final note = body['note'] as String?;
-        if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
+if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             reason == null || reason.trim().isEmpty) {
           return _json({
             'error': 'warehouse_id, item_type, qty (>0), reason majburiy'
           }, status: 400);
+        }
+        if (!_grantedWhContains(request, warehouseId)) {
+          return _json({'error': 'Bu omborga kirish ruxsati yo\'q'}, status: 403);
         }
 
         final db = await DatabaseConnection.getConnection();

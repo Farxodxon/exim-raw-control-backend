@@ -23,6 +23,10 @@ class Policy {
 
   static bool canManageSettings(String role) => role == AppRoles.admin;
 
+  // Admin va director BARCHA omborlar va modullarga to'liq kirishga ega.
+  static bool canViewAllWarehouses(String role) =>
+      role == AppRoles.admin || role == AppRoles.director;
+
   static bool canPlan(String role) =>
       role == AppRoles.admin || role == AppRoles.operationsManager;
 
