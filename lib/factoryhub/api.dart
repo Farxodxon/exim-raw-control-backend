@@ -1957,6 +1957,24 @@ get('/transfers', (Request request) async {
       }
     });
 
+    // GET /transfers/pending/summary — har bir ombor uchun kutilayotgan
+    // qabul soni (omborlar ro'yxatida badge ko'rsatish uchun).
+    get('/transfers/pending/summary', (Request request) async {
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          "SELECT dest_warehouse_id, COUNT(*) FROM fh.stock_transfers "
+          "WHERE status = 'pending' GROUP BY dest_warehouse_id",
+        );
+        return _json({
+          'counts': result.map((r) => {'warehouseId': r[0], 'count': r[1]}).toList(),
+        });
+      } catch (e) {
+        print('transfers/pending/summary xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
     get('/transfers/<id>', (Request request, String id) async {
       try {
         final transferId = int.tryParse(id);
