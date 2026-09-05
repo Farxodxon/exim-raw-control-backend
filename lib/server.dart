@@ -33,7 +33,8 @@ void main() async {
       await conn.execute("ALTER TABLE fh.stock_ledger DROP CONSTRAINT IF EXISTS stock_ledger_item_type_check");
       await conn.execute("""
         ALTER TABLE fh.stock_ledger ADD CONSTRAINT stock_ledger_item_type_check
-        CHECK (item_type IN ('raw_material', 'product', 'spare_part', 'semi_finished', 'item'))
+        CHECK (item_type IN ('raw_material', 'product', 'spare_part', 'semi_finished', 'item',
+               'raw', 'packaging', 'finished', 'intermediate', 'material'))
       """);
       print('✅ fh.stock_ledger columns ensured');
     } catch (_) {}
@@ -184,7 +185,7 @@ void main() async {
       await conn.execute("ALTER TABLE fh.stock_ledger DROP CONSTRAINT IF EXISTS stock_ledger_source_type_check");
       await conn.execute("""
         ALTER TABLE fh.stock_ledger ADD CONSTRAINT stock_ledger_source_type_check
-        CHECK (source_type IN ('manual', 'production_out', 'production_in', 'transfer_out', 'transfer_in', 'loss', 'write_off'))
+        CHECK (source_type IN ('manual', 'production_out', 'production_in', 'transfer_out', 'transfer_in', 'loss', 'write_off', 'production_consume', 'reject_reverse', 'reject_to_defective', 'inspection_in', 'inspection_out'))
       """);
       print('✅ fh.production_batches + stock_ledger source_type extended');
     } catch (_) {}

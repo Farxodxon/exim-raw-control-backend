@@ -58,10 +58,16 @@ Future<Set<String>> _grantedModuleKeys(int uid) async {
 
 // Path prefiksinga mos keluvchi modul kaliti.
 String? _moduleKeyForPath(String path) {
-  if (path.startsWith('hr/')) return 'hr';
-  if (path.startsWith('plans') || path.startsWith('production/')) {
-    return 'production_planning';
+  if (path.startsWith('production/mixing')) return 'production';
+  if (path.startsWith('production/packaging')) return 'packaging';
+  if (path.startsWith('production/')) return 'production';
+  if (path == 'transfers/pending' ||
+      RegExp(r'^transfers/\d+/(confirm|reject)$').hasMatch(path)) {
+    return 'transfer_confirmations';
   }
+  if (path.startsWith('inspections/')) return 'inspection';
+  if (path.startsWith('hr/')) return 'hr';
+  if (path.startsWith('plans')) return 'planning';
   if (path.startsWith('supplier-orders')) return 'supplier_orders';
   if (path.startsWith('users') || path.startsWith('admin/')) return 'user_management';
   if (path.startsWith('thresholds')) return 'admin_settings';
@@ -72,6 +78,43 @@ String? _moduleKeyForPath(String path) {
 bool _grantedWhContains(Request request, int id) {
   if (_fullAccess(_role(request))) return true;
   return ((request.context['fh_wh'] as Set<int>?) ?? <int>{}).contains(id);
+}
+
+// Tur bo'yicha default ombor id (bitta zavod; is_default yo'q bo'lsa birinchisi).
+Future<int?> _defaultWarehouseId(Connection db, String type) async {
+  final res = await db.execute(
+    'SELECT id FROM fh.warehouses WHERE type = \$1 AND is_active '
+    'ORDER BY is_default DESC, id LIMIT 1',
+    parameters: [type],
+  );
+  return res.isEmpty ? null : (res.first[0] as num).toInt();
+}
+
+// Ombordagi item balansi (amount type/id bo'yicha).
+Future<double> _stockBalance(
+    Connection db, int warehouseId, String itemType, int? refId, String? refBarcode) async {
+  final res = await db.execute(
+    '''
+    SELECT COALESCE(SUM(CASE direction WHEN 'in' THEN qty ELSE -qty END), 0)
+    FROM fh.stock_ledger
+    WHERE warehouse_id = \$1 AND item_type = \$2
+      AND (\$3::int IS NULL OR ref_id = \$3)
+      AND (\$4::text IS NULL OR ref_barcode = \$4)
+    ''',
+    parameters: [warehouseId, itemType, refId, refBarcode],
+  );
+  return double.parse(res.first[0].toString());
+}
+
+Future<Map<String, dynamic>?> _itemBrief(Connection db, int? id) async {
+  if (id == null) return null;
+  final res = await db.execute(
+    'SELECT id, name, item_type, code, unit FROM fh.items WHERE id = \$1',
+    parameters: [id],
+  );
+  if (res.isEmpty) return null;
+  final r = res.first;
+  return {'id': r[0], 'name': r[1], 'itemType': r[2], 'code': r[3], 'unit': r[4]};
 }
 
 void _buildSheet(Excel excel, String sheetName, List<dynamic> rows, String direction, String from, String to) {
@@ -1714,6 +1757,47 @@ get('/transfers', (Request request) async {
       }
     });
 
+    // GET /transfers/pending — qabul qiluvchi ombor bo'yicha kutilayotgan o'tkazmalar
+    get('/transfers/pending', (Request request) async {
+      try {
+        final warehouseId =
+            int.tryParse(request.url.queryParameters['warehouse_id'] ?? '');
+        if (warehouseId == null) {
+          return _json({'error': 'warehouse_id majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          '''
+          SELECT t.id, t.item_id, i.name AS item_name, t.unit, t.quantity,
+                 t.source_warehouse_id, sw.name AS source_name,
+                 t.dest_warehouse_id, dw.name AS dest_name,
+                 t.production_batch_id, t.created_by, u.username, t.created_at, t.status
+          FROM fh.stock_transfers t
+          JOIN fh.items i ON i.id = t.item_id
+          LEFT JOIN fh.warehouses sw ON sw.id = t.source_warehouse_id
+          JOIN fh.warehouses dw ON dw.id = t.dest_warehouse_id
+          LEFT JOIN fh.users u ON u.id = t.created_by
+          WHERE t.dest_warehouse_id = \$1 AND t.status = 'pending'
+          ORDER BY t.created_at DESC
+          ''',
+          parameters: [warehouseId],
+        );
+        return _json({
+          'transfers': result.map((r) => {
+            'id': r[0], 'itemId': r[1], 'itemName': r[2], 'unit': r[3],
+            'quantity': r[4]?.toString(),
+            'sourceWarehouseId': r[5], 'sourceName': r[6] ?? 'Ishlab chiqarishdan',
+            'destWarehouseId': r[7], 'destName': r[8],
+            'productionBatchId': r[9], 'createdBy': r[10], 'createdByName': r[11],
+            'createdAt': r[12]?.toString(), 'status': r[13],
+          }).toList(),
+        });
+      } catch (e) {
+        print('transfers/pending xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
     get('/transfers/<id>', (Request request, String id) async {
       try {
         final transferId = int.tryParse(id);
@@ -3003,9 +3087,818 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
           await db.execute('ROLLBACK');
           rethrow;
         }
-      } catch (e) {
+} catch (e) {
         print('write-off xato: $e');
         return _json({'error': 'Server xatosi: $e'}, status: 500);
+      }
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  SODDALASHTIRILGAN ISHLAB CHIQARISH (MIXING) — default omborlar bilan
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET /production/mixing/preview?bom_id=&output_quantity=
+    get('/production/mixing/preview', (Request request) async {
+      try {
+        final bomId = int.tryParse(request.url.queryParameters['bom_id'] ?? '');
+        final outputQty =
+            double.tryParse(request.url.queryParameters['output_quantity'] ?? '');
+        if (bomId == null || outputQty == null || outputQty <= 0) {
+          return _json({'error': 'bom_id va output_quantity (>0) majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+
+        final bom = await db.execute(
+          'SELECT id, name, stage, output_item_id, output_qty_per_batch, output_unit '
+          'FROM fh.boms WHERE id = \$1 AND is_active',
+          parameters: [bomId],
+        );
+        if (bom.isEmpty) return _json({'error': 'Retsept topilmadi'}, status: 404);
+        final b = bom.first;
+        if (b[2] != 'mixing') {
+          return _json({'error': 'Bu retsept aralashtirish bosqichiga tegishli emas'}, status: 400);
+        }
+        final outItemId = b[3] as int?;
+        final perBatch = double.parse(b[4].toString());
+        if (perBatch <= 0) return _json({'error': 'Retsept chiqish miqdori noto\'g\'ri'}, status: 400);
+        final scale = outputQty / perBatch;
+
+        final outItem = await _itemBrief(db, outItemId);
+        if (outItem == null) return _json({'error': 'Chiqish mahsuloti topilmadi'}, status: 404);
+
+        final srcId = await _defaultWarehouseId(db, 'production');
+        final dstId = await _defaultWarehouseId(db, 'semi_finished');
+        if (srcId == null) {
+          return _json({'error': 'Ishlab chiqarish (buffer) ombori belgilanmagan. Ombor sozlamalarida default belgilang.'}, status: 422);
+        }
+        if (dstId == null) {
+          return _json({'error': 'Yarim tayyor mahsulotlar ombori belgilanmagan. Ombor sozlamalarida default belgilang.'}, status: 422);
+        }
+        final srcName = (await db.execute('SELECT name FROM fh.warehouses WHERE id = \$1', parameters: [srcId])).first[0];
+        final dstName = (await db.execute('SELECT name FROM fh.warehouses WHERE id = \$1', parameters: [dstId])).first[0];
+
+        final items = await db.execute(
+          'SELECT item_type, ref_id, ref_barcode, name_snapshot, unit, qty FROM fh.bom_items WHERE bom_id = \$1 ORDER BY id',
+          parameters: [bomId],
+        );
+        if (items.isEmpty) return _json({'error': 'Retsept bo\'sh'}, status: 400);
+
+        final required = <Map<String, dynamic>>[];
+        final shortages = <Map<String, dynamic>>[];
+        for (final it in items) {
+          final itemType = it[0] as String;
+          final refId = it[1] as int?;
+          final refBarcode = it[2] as String?;
+          final name = it[3] as String? ?? '';
+          final unit = it[4] as String? ?? 'dona';
+          final need = double.parse(it[5].toString()) * scale;
+          final available = await _stockBalance(db, srcId, itemType, refId, refBarcode);
+          final ok = available >= need - 0.0001;
+          required.add({'name': name, 'unit': unit, 'needed': need, 'available': available, 'ok': ok});
+          if (!ok) shortages.add({'name': name, 'unit': unit, 'needed': need, 'available': available});
+        }
+
+        return _json({
+          'result': shortages.isEmpty ? 'ok' : 'shortage',
+          'stage': 'mixing',
+          'outputItem': outItem,
+          'outputQty': outputQty,
+          'scale': scale,
+          'sourceWarehouse': {'id': srcId, 'name': srcName, 'type': 'production'},
+          'destWarehouse': {'id': dstId, 'name': dstName, 'type': 'semi_finished'},
+          'required': required,
+          'shortages': shortages,
+        });
+      } catch (e) {
+        print('mixing/preview xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // POST /production/mixing/start  { bom_id, output_quantity }
+    post('/production/mixing/start', (Request request) async {
+      if (!Policy.canPlan(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final bomId = body['bom_id'] as int?;
+        final outputQty = (body['output_quantity'] as num?)?.toDouble();
+        if (bomId == null || outputQty == null || outputQty <= 0) {
+          return _json({'error': 'bom_id va output_quantity (>0) majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+
+        final bom = await db.execute(
+          'SELECT id, name, stage, output_item_id, output_qty_per_batch, output_unit '
+          'FROM fh.boms WHERE id = \$1 AND is_active',
+          parameters: [bomId],
+        );
+        if (bom.isEmpty) return _json({'error': 'Retsept topilmadi'}, status: 404);
+        final b = bom.first;
+        if (b[2] != 'mixing') {
+          return _json({'error': 'Bu retsept aralashtirish bosqichiga tegishli emas'}, status: 400);
+        }
+        final bomName = b[1] as String;
+        final outItemId = b[3] as int?;
+        final perBatch = double.parse(b[4].toString());
+        final outUnit = b[5] as String? ?? 'dona';
+        if (perBatch <= 0) return _json({'error': 'Retsept chiqish miqdori noto\'g\'ri'}, status: 400);
+        final scale = outputQty / perBatch;
+
+        final outItem = await _itemBrief(db, outItemId);
+        if (outItem == null) return _json({'error': 'Chiqish mahsuloti topilmadi'}, status: 404);
+
+        final srcId = await _defaultWarehouseId(db, 'production');
+        final dstId = await _defaultWarehouseId(db, 'semi_finished');
+        if (srcId == null) {
+          return _json({'error': 'Ishlab chiqarish (buffer) ombori belgilanmagan'}, status: 422);
+        }
+        if (dstId == null) {
+          return _json({'error': 'Yarim tayyor mahsulotlar ombori belgilanmagan'}, status: 422);
+        }
+        final dstName = (await db.execute('SELECT name FROM fh.warehouses WHERE id = \$1', parameters: [dstId])).first[0];
+
+        final items = await db.execute(
+          'SELECT item_type, ref_id, ref_barcode, name_snapshot, unit, qty FROM fh.bom_items WHERE bom_id = \$1 ORDER BY id',
+          parameters: [bomId],
+        );
+        if (items.isEmpty) return _json({'error': 'Retsept bo\'sh'}, status: 400);
+
+        // Yetarlilikni oldindan tekshirish (barchasi, to'xtamasdan)
+        final shortages = <Map<String, dynamic>>[];
+        for (final it in items) {
+          final itemType = it[0] as String;
+          final refId = it[1] as int?;
+          final refBarcode = it[2] as String?;
+          final name = it[3] as String? ?? '';
+          final unit = it[4] as String? ?? 'dona';
+          final need = double.parse(it[5].toString()) * scale;
+          final available = await _stockBalance(db, srcId, itemType, refId, refBarcode);
+          if (available < need - 0.0001) {
+            shortages.add({'name': name, 'unit': unit, 'needed': need, 'available': available});
+          }
+        }
+        if (shortages.isNotEmpty) {
+          return _json({
+            'error': 'Xom ashyo yetarli emas',
+            'shortages': shortages,
+          }, status: 422);
+        }
+
+        final planned = outputQty.round();
+        final uid = _uid(request);
+
+        await db.execute('BEGIN');
+        try {
+          for (final it in items) {
+            final itemType = it[0] as String;
+            final refId = it[1] as int?;
+            final refBarcode = it[2] as String?;
+            final name = it[3] as String? ?? '';
+            final unit = it[4] as String? ?? 'dona';
+            final need = double.parse(it[5].toString()) * scale;
+            await db.execute(
+              '''
+              INSERT INTO fh.stock_ledger
+                (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+                 direction, qty, source_type, source_ref, performed_by, note)
+              VALUES (\$1, \$2, \$3, \$4, \$5, \$6, 'out', \$7, 'production_consume', \$8, \$9, \$10)
+              ''',
+              parameters: [
+                srcId, itemType, refId, refBarcode, name, unit,
+                need, 'mixing:$bomId', uid, '$bomName ($outputQty $outUnit)',
+              ],
+            );
+          }
+
+          final batch = await db.execute(
+            'INSERT INTO fh.production_batches '
+            '(product_barcode, bom_id, stage, planned_qty, produced_qty, status, '
+            ' source_warehouse_id, dest_warehouse_id, started_by) '
+            'VALUES (\$1, \$2, \'mixing\', \$3, \$3, \'in_progress\', \$4, \$5, \$6) RETURNING id',
+            parameters: [outItem['name'], bomId, planned, srcId, dstId, uid],
+          );
+          final batchId = batch.first[0];
+
+          final tr = await db.execute(
+            'INSERT INTO fh.stock_transfers '
+            '(item_id, quantity, unit, source_warehouse_id, dest_warehouse_id, '
+            ' production_batch_id, status, created_by) '
+            'VALUES (\$1, \$2, \$3, NULL, \$4, \$5, \'pending\', \$6) RETURNING id',
+            parameters: [outItemId, outputQty, outUnit, dstId, batchId, uid],
+          );
+          final transferId = tr.first[0];
+
+          await db.execute('UPDATE fh.production_batches SET transfer_id = \$1 WHERE id = \$2',
+            parameters: [transferId, batchId]);
+
+          await db.execute('COMMIT');
+          return _json({
+            'message': 'Aralashtirish boshlandi. Natija qabul qiluvchi ombor tasdiqlashini kutmoqda.',
+            'batchId': batchId,
+            'transferId': transferId,
+            'outputItemName': outItem['name'],
+            'outputQty': outputQty,
+            'outputUnit': outUnit,
+            'destWarehouseName': dstName,
+            'pending': true,
+          }, status: 201);
+        } catch (e) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('mixing/start xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  QADOQLASH (PACKAGING) — semi_finished + packaging manbalari
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET /production/packaging/preview?bom_id=&output_quantity=
+    get('/production/packaging/preview', (Request request) async {
+      try {
+        final bomId = int.tryParse(request.url.queryParameters['bom_id'] ?? '');
+        final outputQty =
+            double.tryParse(request.url.queryParameters['output_quantity'] ?? '');
+        if (bomId == null || outputQty == null || outputQty <= 0) {
+          return _json({'error': 'bom_id va output_quantity (>0) majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+
+        final bom = await db.execute(
+          'SELECT id, name, stage, output_item_id, output_qty_per_batch, output_unit '
+          'FROM fh.boms WHERE id = \$1 AND is_active',
+          parameters: [bomId],
+        );
+        if (bom.isEmpty) return _json({'error': 'Retsept topilmadi'}, status: 404);
+        final b = bom.first;
+        if (b[2] != 'packaging') {
+          return _json({'error': 'Bu retsept qadoqlash bosqichiga tegishli emas'}, status: 400);
+        }
+        final outItemId = b[3] as int?;
+        final perBatch = double.parse(b[4].toString());
+        if (perBatch <= 0) return _json({'error': 'Retsept chiqish miqdori noto\'g\'ri'}, status: 400);
+        final scale = outputQty / perBatch;
+
+        final outItem = await _itemBrief(db, outItemId);
+        if (outItem == null) return _json({'error': 'Chiqish mahsuloti topilmadi'}, status: 404);
+
+        final semiId = await _defaultWarehouseId(db, 'semi_finished');
+        final pkgId = await _defaultWarehouseId(db, 'packaging');
+        if (semiId == null) {
+          return _json({'error': 'Yarim tayyor mahsulotlar ombori belgilanmagan'}, status: 422);
+        }
+        if (pkgId == null) {
+          return _json({'error': 'Qadoqlash materiallari ombori belgilanmagan'}, status: 422);
+        }
+        Future<String?> whName(int id) async =>
+            (await db.execute('SELECT name FROM fh.warehouses WHERE id = \$1', parameters: [id])).first[0] as String?;
+
+        final items = await db.execute(
+          'SELECT item_type, ref_id, ref_barcode, name_snapshot, unit, qty FROM fh.bom_items WHERE bom_id = \$1 ORDER BY id',
+          parameters: [bomId],
+        );
+        if (items.isEmpty) return _json({'error': 'Retsept bo\'sh'}, status: 400);
+
+        final required = <Map<String, dynamic>>[];
+        final shortages = <Map<String, dynamic>>[];
+        for (final it in items) {
+          final itemType = it[0] as String;
+          final refId = it[1] as int?;
+          final refBarcode = it[2] as String?;
+          final name = it[3] as String? ?? '';
+          final unit = it[4] as String? ?? 'dona';
+          final need = double.parse(it[5].toString()) * scale;
+          var isPkg = itemType == 'packaging';
+          if (!isPkg && refId != null) {
+            final ref = await _itemBrief(db, refId);
+            if (ref != null && ref['itemType'] == 'packaging') isPkg = true;
+          }
+          final useId = isPkg ? pkgId : semiId;
+          final available = await _stockBalance(db, useId, itemType, refId, refBarcode);
+          final ok = available >= need - 0.0001;
+          required.add({'name': name, 'unit': unit, 'needed': need, 'available': available, 'ok': ok, 'group': isPkg ? 'packaging' : 'semi_finished'});
+          if (!ok) shortages.add({'name': name, 'unit': unit, 'needed': need, 'available': available, 'group': isPkg ? 'packaging' : 'semi_finished'});
+        }
+
+        final finished = await db.execute(
+          'SELECT id, name FROM fh.warehouses WHERE type = \'finished\' AND is_active ORDER BY id');
+
+        return _json({
+          'result': shortages.isEmpty ? 'ok' : 'shortage',
+          'stage': 'packaging',
+          'outputItem': outItem,
+          'outputQty': outputQty,
+          'scale': scale,
+          'sourceSemi': {'id': semiId, 'name': await whName(semiId), 'type': 'semi_finished'},
+          'sourcePackaging': {'id': pkgId, 'name': await whName(pkgId), 'type': 'packaging'},
+          'finishedWarehouses': finished.map((r) => {'id': r[0], 'name': r[1]}).toList(),
+          'required': required,
+          'shortages': shortages,
+        });
+      } catch (e) {
+        print('packaging/preview xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // POST /production/packaging/start  { bom_id, output_quantity, dest_warehouse_id }
+    post('/production/packaging/start', (Request request) async {
+      if (!Policy.canPlan(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final bomId = body['bom_id'] as int?;
+        final outputQty = (body['output_quantity'] as num?)?.toDouble();
+        final destWarehouseId = body['dest_warehouse_id'] as int?;
+        if (bomId == null || outputQty == null || outputQty <= 0 || destWarehouseId == null) {
+          return _json({'error': 'bom_id, output_quantity (>0), dest_warehouse_id majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+
+        final bom = await db.execute(
+          'SELECT id, name, stage, output_item_id, output_qty_per_batch, output_unit '
+          'FROM fh.boms WHERE id = \$1 AND is_active',
+          parameters: [bomId],
+        );
+        if (bom.isEmpty) return _json({'error': 'Retsept topilmadi'}, status: 404);
+        final b = bom.first;
+        if (b[2] != 'packaging') {
+          return _json({'error': 'Bu retsept qadoqlash bosqichiga tegishli emas'}, status: 400);
+        }
+        final bomName = b[1] as String;
+        final outItemId = b[3] as int?;
+        final perBatch = double.parse(b[4].toString());
+        final outUnit = b[5] as String? ?? 'dona';
+        if (perBatch <= 0) return _json({'error': 'Retsept chiqish miqdori noto\'g\'ri'}, status: 400);
+        final scale = outputQty / perBatch;
+
+        final outItem = await _itemBrief(db, outItemId);
+        if (outItem == null) return _json({'error': 'Chiqish mahsuloti topilmadi'}, status: 404);
+
+        // Qabul qiluvchi ombor turi 'finished' bo'lishi shart
+        final dst = await db.execute(
+          'SELECT name, type FROM fh.warehouses WHERE id = \$1 AND is_active', parameters: [destWarehouseId]);
+        if (dst.isEmpty) return _json({'error': 'Qabul qiluvchi ombor topilmadi'}, status: 404);
+        if (dst.first[1] != 'finished') {
+          return _json({'error': 'Qadoqlash natijasi faqat tayyor mahsulot (finished) omboriga qabul qilinadi'}, status: 400);
+        }
+        final dstName = dst.first[0] as String;
+
+        final semiId = await _defaultWarehouseId(db, 'semi_finished');
+        final pkgId = await _defaultWarehouseId(db, 'packaging');
+        if (semiId == null || pkgId == null) {
+          return _json({'error': 'Yarim tayyor yoki qadoqlash materiallari ombori belgilanmagan'}, status: 422);
+        }
+
+        final items = await db.execute(
+          'SELECT item_type, ref_id, ref_barcode, name_snapshot, unit, qty FROM fh.bom_items WHERE bom_id = \$1 ORDER BY id',
+          parameters: [bomId],
+        );
+        if (items.isEmpty) return _json({'error': 'Retsept bo\'sh'}, status: 400);
+
+        // Yetarlilik (ikkala manba bo'yicha)
+        final shortages = <Map<String, dynamic>>[];
+        for (final it in items) {
+          final itemType = it[0] as String;
+          final refId = it[1] as int?;
+          final refBarcode = it[2] as String?;
+          final name = it[3] as String? ?? '';
+          final unit = it[4] as String? ?? 'dona';
+          final need = double.parse(it[5].toString()) * scale;
+          final isPkg = itemType == 'packaging';
+          final useId = isPkg ? pkgId : semiId;
+          final available = await _stockBalance(db, useId, itemType, refId, refBarcode);
+          if (available < need - 0.0001) {
+            shortages.add({'name': name, 'unit': unit, 'needed': need, 'available': available, 'group': isPkg ? 'packaging' : 'semi_finished'});
+          }
+        }
+        if (shortages.isNotEmpty) {
+          return _json({'error': 'Materiallar yetarli emas', 'shortages': shortages}, status: 422);
+        }
+
+        final planned = outputQty.round();
+        final uid = _uid(request);
+
+        await db.execute('BEGIN');
+        try {
+          for (final it in items) {
+            final itemType = it[0] as String;
+            final refId = it[1] as int?;
+            final refBarcode = it[2] as String?;
+            final name = it[3] as String? ?? '';
+            final unit = it[4] as String? ?? 'dona';
+            final need = double.parse(it[5].toString()) * scale;
+            final isPkg = itemType == 'packaging';
+            final useId = isPkg ? pkgId : semiId;
+            await db.execute(
+              '''
+              INSERT INTO fh.stock_ledger
+                (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+                 direction, qty, source_type, source_ref, performed_by, note)
+              VALUES (\$1, \$2, \$3, \$4, \$5, \$6, 'out', \$7, 'production_consume', \$8, \$9, \$10)
+              ''',
+              parameters: [
+                useId, itemType, refId, refBarcode, name, unit,
+                need, 'packaging:$bomId', uid, '$bomName ($outputQty $outUnit)',
+              ],
+            );
+          }
+
+          final batch = await db.execute(
+            'INSERT INTO fh.production_batches '
+            '(product_barcode, bom_id, stage, planned_qty, produced_qty, status, '
+            ' source_warehouse_id, dest_warehouse_id, started_by) '
+            'VALUES (\$1, \$2, \'packaging\', \$3, \$3, \'in_progress\', \$4, \$5, \$6) RETURNING id',
+            parameters: [outItem['name'], bomId, planned, semiId, destWarehouseId, uid],
+          );
+          final batchId = batch.first[0];
+
+          final tr = await db.execute(
+            'INSERT INTO fh.stock_transfers '
+            '(item_id, quantity, unit, source_warehouse_id, dest_warehouse_id, '
+            ' production_batch_id, status, created_by) '
+            'VALUES (\$1, \$2, \$3, NULL, \$4, \$5, \'pending\', \$6) RETURNING id',
+            parameters: [outItemId, outputQty, outUnit, destWarehouseId, batchId, uid],
+          );
+          final transferId = tr.first[0];
+
+          await db.execute('UPDATE fh.production_batches SET transfer_id = \$1 WHERE id = \$2',
+            parameters: [transferId, batchId]);
+
+          await db.execute('COMMIT');
+          return _json({
+            'message': 'Qadoqlash boshlandi. Natija qabul qiluvchi ombor tasdiqlashini kutmoqda.',
+            'batchId': batchId,
+            'transferId': transferId,
+            'outputItemName': outItem['name'],
+            'outputQty': outputQty,
+            'outputUnit': outUnit,
+            'destWarehouseName': dstName,
+            'pending': true,
+          }, status: 201);
+        } catch (e) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('packaging/start xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  TASDIQLASH ZANJIRI (pending transfers: confirm / reject)
+// ─────────────────────────────────────────────────────────────────────────
+    //  TASDIQLASH ZANJIRI (pending transfers: confirm / reject)
+    // ─────────────────────────────────────────────────────────────────────────
+    // POST /transfers/<id>/confirm
+    post('/transfers/<id>/confirm', (Request request, String id) async {
+      if (!Policy.canTransactStock(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final transferId = int.tryParse(id);
+      if (transferId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final tr = await db.execute(
+          'SELECT id, item_id, quantity, unit, source_warehouse_id, dest_warehouse_id, '
+          'production_batch_id, status FROM fh.stock_transfers WHERE id = \$1',
+          parameters: [transferId],
+        );
+        if (tr.isEmpty) return _json({'error': 'O\'tkazma topilmadi'}, status: 404);
+        final r = tr.first;
+        if (r[7] != 'pending') {
+          return _json({'error': 'Bu o\'tkazma allaqachon hal qilingan'}, status: 409);
+        }
+        final destId = (r[5] as num).toInt();
+        if (!_grantedWhContains(request, destId)) {
+          return _json({'error': 'Bu omborga kirish ruxsati yo\'q'}, status: 403);
+        }
+        final itemId = r[1] as int;
+        final qty = double.parse(r[2].toString());
+        final unit = r[3] as String;
+        final batchId = r[6] as int?;
+        final item = await _itemBrief(db, itemId) ?? <String, dynamic>{'name': 'Mahsulot'};
+        final uid = _uid(request);
+
+        await db.execute('BEGIN');
+        try {
+          await db.execute(
+            '''
+            INSERT INTO fh.stock_ledger
+              (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+               direction, qty, source_type, source_ref, performed_by, note)
+            VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'in', \$6, 'transfer_in', \$7::text, \$8, \$9)
+            ''',
+            parameters: [
+              destId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit,
+              qty, transferId, uid, 'Transfer #$transferId',
+            ],
+          );
+          await db.execute(
+            'UPDATE fh.stock_transfers SET status = \'confirmed\', confirmed_by = \$1, confirmed_at = now() WHERE id = \$2',
+            parameters: [uid, transferId],
+          );
+          if (batchId != null) {
+            await db.execute(
+              'UPDATE fh.production_batches SET status = \'completed\', completed_at = now() WHERE id = \$1 AND status = \'in_progress\'',
+              parameters: [batchId],
+            );
+          }
+          await db.execute('COMMIT');
+          return _json({'message': 'Qabul qilindi, ombor balansiga qo\'shildi', 'transferId': transferId});
+        } catch (e) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('transfers confirm xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // POST /transfers/<id>/reject  { reason }
+    post('/transfers/<id>/reject', (Request request, String id) async {
+      if (!Policy.canTransactStock(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final transferId = int.tryParse(id);
+      if (transferId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+      try {
+        final body = await _body(request);
+        final reason = (body['reason'] as String?)?.trim();
+        if (reason == null || reason.isEmpty) {
+          return _json({'error': 'Rad etish sababi majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        final tr = await db.execute(
+          'SELECT id, item_id, quantity, unit, source_warehouse_id, dest_warehouse_id, '
+          'production_batch_id, status FROM fh.stock_transfers WHERE id = \$1',
+          parameters: [transferId],
+        );
+        if (tr.isEmpty) return _json({'error': 'O\'tkazma topilmadi'}, status: 404);
+        final r = tr.first;
+        if (r[7] != 'pending') {
+          return _json({'error': 'Bu o\'tkazma allaqachon hal qilingan'}, status: 409);
+        }
+        final destId = (r[5] as num).toInt();
+        if (!_grantedWhContains(request, destId)) {
+          return _json({'error': 'Bu omborga kirish ruxsati yo\'q'}, status: 403);
+        }
+        final srcId = r[4] as int?;
+        final itemId = r[1] as int;
+        final qty = double.parse(r[2].toString());
+        final unit = r[3] as String;
+        final batchId = r[6] as int?;
+        final item = await _itemBrief(db, itemId) ?? <String, dynamic>{'name': 'Mahsulot'};
+        final uid = _uid(request);
+
+        // Rad etilgan miqdor qayerga: manba bor bo'lsa manbaga,
+        // ishlab chiqarish/qadoqlash natijasi bo'lsa Brak/nikoz omboriga.
+        int? reverseDestId = srcId;
+        String reverseType = 'reject_reverse';
+        if (srcId == null) {
+          reverseDestId = await _defaultWarehouseId(db, 'defective');
+          if (reverseDestId == null) {
+            return _json({'error': 'Brak/nikoz ombori topilmadi'}, status: 422);
+          }
+          reverseType = 'reject_to_defective';
+        }
+
+        await db.execute('BEGIN');
+        try {
+          await db.execute(
+            '''
+            INSERT INTO fh.stock_ledger
+              (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+               direction, qty, source_type, source_ref, performed_by, note)
+            VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'in', \$6, \$7, \$8::text, \$9, \$10)
+            ''',
+            parameters: [
+              reverseDestId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit, qty,
+              reverseType, transferId, uid, 'Rad etildi: $reason',
+            ],
+          );
+          await db.execute(
+            'UPDATE fh.stock_transfers SET status = \'rejected\', reject_reason = \$1, '
+            'confirmed_by = \$2, confirmed_at = now() WHERE id = \$3',
+            parameters: [reason, uid, transferId],
+          );
+          if (batchId != null) {
+            await db.execute(
+              'UPDATE fh.production_batches SET status = \'cancelled\' WHERE id = \$1 AND status = \'in_progress\'',
+              parameters: [batchId],
+            );
+          }
+          await db.execute('COMMIT');
+          return _json({'message': 'O\'tkazma rad etildi', 'transferId': transferId});
+        } catch (e) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('transfers reject xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────
+    //  KARANTIN TEKSHIRUVI (inspections)
+    // ─────────────────────────────────────────────────────────────────────────
+    // POST /inspections/receive  { item_id, quantity, unit?, quarantine_warehouse_id, note? }
+    post('/inspections/receive', (Request request) async {
+      if (!Policy.canTransactStock(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final itemId = body['item_id'] as int?;
+        final qty = (body['quantity'] as num?)?.toDouble();
+        final unit = body['unit'] as String? ?? 'dona';
+        final whId = body['quarantine_warehouse_id'] as int?;
+        final note = body['note'] as String?;
+        if (itemId == null || qty == null || qty <= 0 || whId == null) {
+          return _json({'error': 'item_id, quantity (>0), quarantine_warehouse_id majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        final item = await _itemBrief(db, itemId);
+        if (item == null) return _json({'error': 'Mahsulot (item) topilmadi'}, status: 404);
+        final wh = await db.execute(
+          'SELECT type FROM fh.warehouses WHERE id = \$1 AND is_active', parameters: [whId]);
+        if (wh.isEmpty) return _json({'error': 'Ombor topilmadi'}, status: 404);
+        if (wh.first[0] != 'quarantine') {
+          return _json({'error': 'Qabul faqat karantin omboriga qilinadi'}, status: 400);
+        }
+        if (!_grantedWhContains(request, whId)) {
+          return _json({'error': 'Bu omborga kirish ruxsati yo\'q'}, status: 403);
+        }
+        final uid = _uid(request);
+
+        await db.execute('BEGIN');
+        try {
+          final led = await db.execute(
+            '''
+            INSERT INTO fh.stock_ledger
+              (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+               direction, qty, source_type, source_ref, performed_by, note)
+            VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'in', \$6, 'inspection_in', \$7, \$8, \$9)
+            RETURNING id
+            ''',
+            parameters: [whId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit, qty, 'inspection:receive', uid, note],
+          );
+          final ledgerId = led.first[0];
+          final insp = await db.execute(
+            'INSERT INTO fh.inspections '
+            '(item_id, quantity, unit, quarantine_warehouse_id, source_ledger_id, status) '
+            'VALUES (\$1, \$2, \$3, \$4, \$5, \'pending\') RETURNING id',
+            parameters: [itemId, qty, unit, whId, ledgerId],
+          );
+          await db.execute('COMMIT');
+          return _json({
+            'message': 'Karantinga qabul qilindi, tekshiruv kutilmoqda',
+            'inspectionId': insp.first[0],
+          }, status: 201);
+        } catch (e) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('inspections receive xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // GET /inspections/pending?warehouse_id=
+    get('/inspections/pending', (Request request) async {
+      try {
+        final warehouseId =
+            int.tryParse(request.url.queryParameters['warehouse_id'] ?? '');
+        if (warehouseId == null) {
+          return _json({'error': 'warehouse_id majburiy'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        final result = await db.execute(
+          '''
+          SELECT i.id, i.item_id, it.name AS item_name, i.unit, i.quantity,
+                 i.quarantine_warehouse_id, w.name AS wh_name, i.created_at, i.note
+          FROM fh.inspections i
+          JOIN fh.items it ON it.id = i.item_id
+          JOIN fh.warehouses w ON w.id = i.quarantine_warehouse_id
+          WHERE i.quarantine_warehouse_id = \$1 AND i.status = 'pending'
+          ORDER BY i.created_at ASC
+          ''',
+          parameters: [warehouseId],
+        );
+        return _json({
+          'inspections': result.map((r) => {
+            'id': r[0], 'itemId': r[1], 'itemName': r[2], 'unit': r[3],
+            'quantity': r[4]?.toString(),
+            'warehouseId': r[5], 'warehouseName': r[6],
+            'createdAt': r[7]?.toString(), 'note': r[8],
+          }).toList(),
+        });
+      } catch (e) {
+        print('inspections/pending xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // POST /inspections/<id>/decide  { result: approved|rejected, note? }
+    post('/inspections/<id>/decide', (Request request, String id) async {
+      if (!Policy.canTransactStock(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final inspectionId = int.tryParse(id);
+      if (inspectionId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+      try {
+        final body = await _body(request);
+        final result = body['result'] as String?;
+        final note = body['note'] as String?;
+        if (result == null || !['approved', 'rejected'].contains(result)) {
+          return _json({'error': 'result: approved|rejected kerak'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        final insp = await db.execute(
+          'SELECT id, item_id, quantity, unit, quarantine_warehouse_id, status '
+          'FROM fh.inspections WHERE id = \$1',
+          parameters: [inspectionId],
+        );
+        if (insp.isEmpty) return _json({'error': 'Tekshiruv topilmadi'}, status: 404);
+        final r = insp.first;
+        if (r[5] != 'pending') {
+          return _json({'error': 'Bu tekshiruv allaqachon hal qilingan'}, status: 409);
+        }
+        final qWhId = (r[4] as num).toInt();
+        if (!_grantedWhContains(request, qWhId)) {
+          return _json({'error': 'Bu omborga kirish ruxsati yo\'q'}, status: 403);
+        }
+        final itemId = r[1] as int;
+        final qty = double.parse(r[2].toString());
+        final unit = r[3] as String;
+        final item = await _itemBrief(db, itemId) ?? <String, dynamic>{'name': 'Mahsulot'};
+        final uid = _uid(request);
+
+        // approved → Xom-ashyo ombori, rejected → Brak/nikoz ombori
+        final destType = result == 'approved' ? 'raw' : 'defective';
+        final destId = await _defaultWarehouseId(db, destType);
+        if (destId == null) {
+          return _json({'error': result == 'approved' ? 'Xom-ashyo ombori topilmadi' : 'Brak/nikoz ombori topilmadi'}, status: 422);
+        }
+
+        await db.execute('BEGIN');
+        try {
+          // Karantindan chiqim
+          await db.execute(
+            '''
+            INSERT INTO fh.stock_ledger
+              (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+               direction, qty, source_type, source_ref, performed_by, note)
+            VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'out', \$6, 'inspection_out', \$7::text, \$8, \$9)
+            ''',
+            parameters: [qWhId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit, qty, inspectionId, uid, note],
+          );
+          // Manzil omboriga kirim (approved → raw, rejected → defective)
+          await db.execute(
+            '''
+            INSERT INTO fh.stock_ledger
+              (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+               direction, qty, source_type, source_ref, performed_by, note)
+            VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'in', \$6, 'inspection_in', \$7::text, \$8, \$9)
+            ''',
+            parameters: [destId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit, qty, inspectionId, uid, note],
+          );
+          // Qaror tasdiq hisoblanadi — konfirmatsiya kutilmaydi
+          final tr = await db.execute(
+            'INSERT INTO fh.stock_transfers '
+            '(item_id, quantity, unit, source_warehouse_id, dest_warehouse_id, '
+            ' status, created_by, confirmed_by, confirmed_at) '
+            'VALUES (\$1, \$2, \$3, \$4, \$5, \'confirmed\', \$6, \$6, now()) RETURNING id',
+            parameters: [itemId, qty, unit, qWhId, destId, uid],
+          );
+          final transferId = tr.first[0];
+          await db.execute(
+            'UPDATE fh.inspections SET status = \$1, inspected_by = \$2, inspected_at = now(), '
+            'note = \$3, resulting_transfer_id = \$4 WHERE id = \$5',
+            parameters: [result, uid, note, transferId, inspectionId],
+          );
+          await db.execute('COMMIT');
+          return _json({
+            'message': result == 'approved' ? 'Tasdiqlandi, Xom-ashyo omboriga yo\'naltirildi' : 'Rad etildi, Brak/nikoz omboriga yo\'naltirildi',
+            'inspectionId': inspectionId,
+            'transferId': transferId,
+            'destWarehouseId': destId,
+          });
+        } catch (e) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('inspections decide xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
       }
     });
 
