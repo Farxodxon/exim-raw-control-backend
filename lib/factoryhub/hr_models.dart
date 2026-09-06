@@ -67,6 +67,7 @@ class AttendanceRecord {
   final String? checkIn;
   final String? checkOut;
   final double? hoursWorked;
+  final double overtimeHours;
   final String status;
   final String? note;
   final int? recordedBy;
@@ -79,6 +80,7 @@ class AttendanceRecord {
     this.checkIn,
     this.checkOut,
     this.hoursWorked,
+    this.overtimeHours = 0,
     this.status = 'present',
     this.note,
     this.recordedBy,
@@ -92,9 +94,10 @@ class AttendanceRecord {
         checkIn: _timeToString(r[3]),
         checkOut: _timeToString(r[4]),
         hoursWorked: r[5] == null ? null : double.parse(r[5].toString()),
-        status: r[6] as String? ?? 'present',
-        note: r[7] as String?,
-        recordedBy: r[8] as int?,
+        overtimeHours: r[6] == null ? 0 : double.parse(r[6].toString()),
+        status: r[7] as String? ?? 'present',
+        note: r[8] as String?,
+        recordedBy: r[9] as int?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -104,6 +107,7 @@ class AttendanceRecord {
         'checkIn': checkIn,
         'checkOut': checkOut,
         'hoursWorked': hoursWorked,
+        'overtimeHours': overtimeHours,
         'status': status,
         'note': note,
         'recordedBy': recordedBy,

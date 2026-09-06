@@ -4930,16 +4930,16 @@ if (body['hireDate'] != null) {
           where += ' AND a.work_date <= \$${params.length}';
         }
         final db = await DatabaseConnection.getConnection();
-        final res = await db.execute(
+final res = await db.execute(
           'SELECT a.id, a.employee_id, a.work_date, a.check_in, a.check_out, '
-          'a.hours_worked, a.status, a.note, a.recorded_by, e.full_name '
+          'a.hours_worked, a.overtime_hours, a.status, a.note, a.recorded_by, e.full_name '
           'FROM fh.attendance a JOIN fh.employees e ON e.id = a.employee_id '
           'WHERE ${where} ORDER BY a.work_date DESC, a.employee_id',
           parameters: params,
         );
         final list = res.map((r) {
           final m = AttendanceRecord.fromRow(r).toJson();
-          m['employeeName'] = r[9];
+          m['employeeName'] = r[10];
           return m;
         }).toList();
         return _json({'attendance': list});
@@ -4954,8 +4954,13 @@ double? _hours(String? inStr, String? outStr) {
       final a = DateTime.tryParse('2000-01-01 $inStr');
       final b = DateTime.tryParse('2000-01-01 $outStr');
       if (a == null || b == null) return null;
-      final diff = b.difference(a).inMinutes / 60.0;
-      return double.parse(diff.toStringAsFixed(2));
+      var minutes = b.difference(a).inMinutes;
+      if (minutes < 0) minutes += 1440; // tun smenasi (masalan 22:00 -> 06:00)
+      final diff = minutes / 60.0;
+      // Obed (tushlik) hisobiga asosiy ish vaqti 8 soat bilan chegaralanadi:
+      // 08:00-18:00 = 10 soat bo'lsa ham ish = 8 soat.
+      final capped = diff > 8 ? 8.0 : diff;
+      return double.parse(capped.toStringAsFixed(2));
     }
 
     String? _timeToHm(dynamic v) {
@@ -4974,8 +4979,9 @@ double? _hours(String? inStr, String? outStr) {
         final eid = body['employeeId'] as int?;
         final workDate = body['workDate'] as String?;
         final status = body['status'] as String? ?? 'present';
-        final checkIn = body['checkIn'] as String?;
+final checkIn = body['checkIn'] as String?;
         final checkOut = body['checkOut'] as String?;
+        final overtime = (body['overtimeHours'] as num?)?.toDouble();
         if (eid == null || workDate == null || workDate.isEmpty) {
           return _json({'error': 'employeeId va workDate majburiy'}, status: 400);
         }
@@ -4985,15 +4991,15 @@ double? _hours(String? inStr, String? outStr) {
         try {
           final res = await db.execute(
             '''INSERT INTO fh.attendance
-               (employee_id, work_date, check_in, check_out, hours_worked, status, note, recorded_by)
-               VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)
+               (employee_id, work_date, check_in, check_out, hours_worked, overtime_hours, status, note, recorded_by)
+               VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)
                RETURNING id, employee_id, work_date, check_in, check_out,
-                         hours_worked, status, note, recorded_by''',
+                         hours_worked, overtime_hours, status, note, recorded_by''',
             parameters: [
               eid, workDate,
               checkIn?.isEmpty ?? true ? null : checkIn,
               checkOut?.isEmpty ?? true ? null : checkOut,
-              hours, status, body['note'], _uid(request),
+              hours, overtime ?? 0, status, body['note'], _uid(request),
             ],
           );
 return _json({'attendance': AttendanceRecord.fromRow(res.first).toJson()}, status: 201);
@@ -5029,22 +5035,23 @@ return _json({'attendance': AttendanceRecord.fromRow(res.first).toJson()}, statu
           final eid = m['employeeId'] as int?;
           if (eid == null) continue;
           final status = m['status'] as String? ?? 'present';
-          final checkIn = m['checkIn'] as String?;
+final checkIn = m['checkIn'] as String?;
           final checkOut = m['checkOut'] as String?;
+          final overtime = (m['overtimeHours'] as num?)?.toDouble();
           final hours = _hours(checkIn?.isEmpty ?? true ? null : checkIn,
               checkOut?.isEmpty ?? true ? null : checkOut);
           try {
             final res = await db.execute(
               '''INSERT INTO fh.attendance
-                 (employee_id, work_date, check_in, check_out, hours_worked, status, note, recorded_by)
-                 VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8)
+                 (employee_id, work_date, check_in, check_out, hours_worked, overtime_hours, status, note, recorded_by)
+                 VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)
                  RETURNING id, employee_id, work_date, check_in, check_out,
-                           hours_worked, status, note, recorded_by''',
+                           hours_worked, overtime_hours, status, note, recorded_by''',
               parameters: [
                 eid, workDate,
                 checkIn?.isEmpty ?? true ? null : checkIn,
                 checkOut?.isEmpty ?? true ? null : checkOut,
-                hours, status, m['note'], _uid(request),
+                hours, overtime ?? 0, status, m['note'], _uid(request),
               ],
             );
 inserted.add(AttendanceRecord.fromRow(res.first).toJson());
@@ -5103,9 +5110,13 @@ String? existingIn = _timeToHm(cur.first[0]);
           params.add(bodyOut.isEmpty ? null : bodyOut);
           if (!bodyOut.isEmpty) recalcHours = true;
         }
-        if (recalcHours) {
+if (recalcHours) {
           setParts.add('hours_worked = \$${params.length + 1}');
           params.add(_hours(existingIn, existingOut));
+        }
+        if (body['overtimeHours'] != null) {
+          setParts.add('overtime_hours = \$${params.length + 1}');
+          params.add((body['overtimeHours'] as num).toDouble());
         }
         if (bodyStatus != null) {
           setParts.add('status = \$${params.length + 1}');
@@ -5122,7 +5133,7 @@ String? existingIn = _timeToHm(cur.first[0]);
         final res = await db.execute(
           'UPDATE fh.attendance SET ${setParts.join(', ')} WHERE id = \$${params.length} '
           'RETURNING id, employee_id, work_date, check_in, check_out, '
-          'hours_worked, status, note, recorded_by',
+          'hours_worked, overtime_hours, status, note, recorded_by',
           parameters: params,
         );
         return _json({'attendance': AttendanceRecord.fromRow(res.first).toJson()});
@@ -5552,7 +5563,7 @@ get('/hr/reports/monthly', (Request request) async {
         final db = await DatabaseConnection.getConnection();
         final res = await db.execute(
           'SELECT employee_id, full_name, position, department, pay_type, month, '
-          'days_present, days_absent, days_late, total_hours, '
+          'days_present, days_absent, days_late, total_hours, total_overtime_hours, '
           'base_salary_component, piece_rate_component, '
           'total_bonus, total_penalty, total_advance, net_amount '
           'FROM fh.monthly_payroll_summary WHERE ${where} '
@@ -5570,12 +5581,13 @@ get('/hr/reports/monthly', (Request request) async {
           'daysAbsent': r[7],
           'daysLate': r[8],
           'totalHours': r[9]?.toString(),
-          'baseSalaryComponent': r[10]?.toString() ?? '0',
-          'pieceRateComponent': r[11]?.toString() ?? '0',
-          'totalBonus': r[12]?.toString(),
-          'totalPenalty': r[13]?.toString(),
-          'totalAdvance': r[14]?.toString(),
-          'netAmount': r[15]?.toString() ?? '0',
+          'totalOvertimeHours': r[10]?.toString(),
+          'baseSalaryComponent': r[11]?.toString() ?? '0',
+          'pieceRateComponent': r[12]?.toString() ?? '0',
+          'totalBonus': r[13]?.toString(),
+          'totalPenalty': r[14]?.toString(),
+          'totalAdvance': r[15]?.toString(),
+          'netAmount': r[16]?.toString() ?? '0',
         }).toList();
         return _json({'rows': list});
       } catch (e) {
