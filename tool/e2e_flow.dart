@@ -427,7 +427,7 @@ Future<void> main() async {
   check('keeper pending 200 (ombor granti, modulsiz)', s == 200, 'status=$s');
 
   await c.execute(
-      "INSERT INTO fh.user_modules (user_id, module_key) VALUES (\$1, 'production'),(\$1, 'transfer_confirmations'),(\$1, 'inspection')",
+      "INSERT INTO fh.user_modules (user_id, module_key) VALUES (\$1, 'production'),(\$1, 'inspection')",
       parameters: [keeperId]);
 
   (s, _) = await call('GET',

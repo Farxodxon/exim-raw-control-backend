@@ -11,6 +11,8 @@ class Employee {
   final String status;
   final double? baseSalary;
   final String? note;
+  final String payType;
+  final int? userId;
 
   Employee({
     required this.id,
@@ -23,6 +25,8 @@ class Employee {
     this.status = 'active',
     this.baseSalary,
     this.note,
+    this.payType = 'salary',
+    this.userId,
   });
 
   factory Employee.fromRow(List<dynamic> r) => Employee(
@@ -36,6 +40,8 @@ class Employee {
         status: r[7] as String? ?? 'active',
         baseSalary: r[8] == null ? null : double.parse(r[8].toString()),
         note: r[9] as String?,
+        payType: r[10] as String? ?? 'salary',
+        userId: r[11] as int?,
       );
 
   Map<String, dynamic> toJson() => {
@@ -49,6 +55,8 @@ class Employee {
         'status': status,
         'baseSalary': baseSalary,
         'note': note,
+        'payType': payType,
+        'userId': userId,
       };
 }
 
