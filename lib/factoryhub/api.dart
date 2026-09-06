@@ -3103,13 +3103,16 @@ put('/boms/<id>', (Request request, String id) async {
         final outputQtyPerBatch = double.parse(bomRow[4].toString());
         final outputUnit = bomRow[5] as String? ?? 'dona';
 
-        final outItem = await db.execute(
+final outItem = await db.execute(
           'SELECT name, unit FROM fh.items WHERE id = \$1',
           parameters: [outputItemId],
         );
         if (outItem.isEmpty) return _json({'error': 'Chiqish mahsuloti topilmadi'}, status: 404);
         final outName = outItem.first[0] as String;
         final outUnit = outItem.first[1] as String? ?? outputUnit;
+
+        final empId = await _resolveWorkEmployeeId(
+            db, request, (body['employee_id'] ?? body['employeeId']) as int?);
 
         // ── Ombor turlarini tekshirish ──
         final srcWh = await db.execute(
@@ -3225,21 +3228,27 @@ put('/boms/<id>', (Request request, String id) async {
             ],
           );
 
-          // 3) Record production batch
+// 3) Record production batch
           final batchResult = await db.execute(
             '''
             INSERT INTO fh.production_batches
               (product_barcode, bom_id, stage, planned_qty, produced_qty, status,
-               source_warehouse_id, dest_warehouse_id, started_by, completed_at)
-            VALUES (\$1, \$2, \$3, \$4, \$4, 'completed', \$5, \$6, \$7, now())
+               source_warehouse_id, dest_warehouse_id, started_by, employee_id, completed_at)
+            VALUES (\$1, \$2, \$3, \$4, \$4, 'completed', \$5, \$6, \$7, \$8, now())
             RETURNING id
             ''',
             parameters: [
               outName, bomId, stage, batches,
-              sourceWarehouseId, destWarehouseId, _uid(request),
+              sourceWarehouseId, destWarehouseId, _uid(request), empId,
             ],
           );
           final batchId = batchResult.first[0];
+
+          String? warning;
+          if (empId != null) {
+            warning = await _autoCreateWorkRecord(
+                db, empId, stage, outputItemId, totalOutQty, outUnit, batchId, '$bomName ($batches x)');
+          }
 
           await db.execute('COMMIT');
           return _json({
@@ -3250,6 +3259,8 @@ put('/boms/<id>', (Request request, String id) async {
             'outputQty': totalOutQty,
             'outputUnit': outUnit,
             'destWarehouseName': dstWhName,
+            if (empId != null) 'employeeId': empId,
+            if (warning != null) 'warning': warning,
           }, status: 201);
         } catch (_) {
           await db.execute('ROLLBACK');
