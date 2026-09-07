@@ -1,6 +1,6 @@
 # FactoryHub Backend — Loyiha Dokumentatsiyasi
 
-> Oxirgi yangilanish: 2026-09-06 | Backend: `95c697d` | Frontend: `8469e88`
+> Oxirgi yangilanish: 2026-09-07 | Backend: `86ddeaf` | Frontend: `357ca28`
 
 ---
 
@@ -46,7 +46,7 @@ exim-raw-control-backend/
 │       ├── policy.dart          # Ruxsat tekshirish (_canRead/_canWrite)
 │       ├── user.dart            # User model
 │       └── user_storage.dart    # Foydalanuvchi CRUD
-├── migrations/                  # SQL migratsiyalar (001–010)
+├── migrations/                  # SQL migratsiyalar (001–011)
 │   ├── 001_warehouse_types_and_regime51.sql
 │   ├── 002_hr_module.sql
 │   ├── 003_module_permissions.sql
@@ -56,7 +56,8 @@ exim-raw-control-backend/
 │   ├── 007_wide_item_identifiers.sql
 │   ├── 008_module_corrections.sql
 │   ├── 009_hr_pay_types.sql
-│   └── 010_attendance_overtime.sql
+│   ├── 010_attendance_overtime.sql
+│   └── 011_fixed_route.sql        # fh.warehouses.fixed_route_to_id
 ├── tool/                        # Test skriptlari va migration runner'lar
 │   ├── e2e_flow.dart           # To'liq e2e test (105 test, server 8051)
 │   ├── test_hr_pay.dart        # HR + ish haqi testlari (38 test)
@@ -357,6 +358,7 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 
 | Sana | Commit | Tavsif |
 |---|---|---|
+| 2026-09-07 | `86ddeaf` | **Qat'iy transfer sherigi (fixed_route_to_id):** admin ombor sozlamalarida yangi `fixed_route_to_id` ustuni (migratsiya 011). PUT/POST/GET `/warehouses` qat'iy omborni qabul qiladi (faqat transferTo ro'yxati ichidan, canTransfer bo'lsa). `/transfers/send` va legacy `/transfers` qat'iy belgilangan ombor boshqa manzilga yuborilganda 403 qaytaradi; qat'iy manzilga ruxsat etiladi. Packaging `finishedWarehouses` preview endi yarim tayyor omborining finished-routes'laridan (qat'iy bo'lsa faqat o'sha) to'ldiriladi; packaging/start faqat tayinlangan finished omboriga ishlaydi (boshqasiga 403). Frontend `357ca28`: ombor sozlamalarida "Qat'iy (avtomatik) ombor" tanlagichi; transfer oynasida qat'iy ombor bo'lsa manzil tanlanmaydi (avtomatik). E2E yangilandi (125/125) |
 | 2026-09-07 | `96394c2` | **Qadoqlash darhol o'tishi:** /production/packaging/start endi natijani tanlangan tayyor mahsulot omboriga **darhol** o'tkazadi (transfer auto-confirmed, partiya completed, pending=false) — qabul qiluvchi ombor tasdig'ini kutmaydi. E2E yangilandi (104/104) |
 | 2026-09-07 | `10c1f7a` | **Dashboard statistika:** totalEmployees + dealerWarehouses, activeWarehouses/batchesInProgress olib tashlandi; **Tekshiruv:** approve yarim tayyor → yarim tayyor ombori, xom ashyo → xom ombori (item_type bo'yicha, destType javobda) |
 | 2026-09-06 | `95c697d` | **Davomat overtime:** attendance.overtime_hours (manual), ish vaqti 8h cap (obed bilan), monthly total_overtime_hours |
@@ -384,4 +386,4 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 
 ## 12. Frontend repo
 
-Flutter frontend: [Farxodxon/factory_hub](https://github.com/Farxodxon/factory_hub) — push ⇒ avtomatik build. Frontend commit `e710fde` (2026-09-07): Qadoqlash matni yangilandi; Yangi mahsulot (to'liq tarkib) 3 bosqichli wizard — finished item + aralashtirish retsepti + qadoqlash retsepti birgalikda.
+Flutter frontend: [Farxodxon/factory_hub](https://github.com/Farxodxon/factory_hub) — push ⇒ avtomatik build. Frontend commit `357ca28` (2026-09-07): Qat'iy transfer yo'nalishi — ombor sozlamalarida "Qat'iy (avtomatik) ombor" tanlagichi (`_EditWarehouseSheet`); transfer oynasi (`_TransferSheet`) qat'iy ombor belgilangan bo'lsa manzilni yashirib avtomatik yuboradi. Avvalgi: `e710fde` Yangi mahsulot (to'liq tarkib) 3 bosqichli wizard — finished item + aralashtirish retsepti + qadoqlash retsepti birgalikda.
