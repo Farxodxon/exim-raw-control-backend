@@ -3815,6 +3815,31 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
           await db.execute('UPDATE fh.production_batches SET transfer_id = \$1 WHERE id = \$2',
             parameters: [transferId, batchId]);
 
+          // Yangi qoida: qadoqlangan mahsulot darhol tayyor mahsulot omboriga
+          // kiradi — qabul qiluvchi ombor tasdig'ini kutib o'tirmaydi. Transfer
+          // bir xil transaksiyada confirmed bo'ladi, partiya yakunlanadi.
+          final outItemType = (outItem['itemType'] as String?) ?? 'item';
+          await db.execute(
+            '''
+            INSERT INTO fh.stock_ledger
+              (warehouse_id, item_type, ref_id, ref_barcode, name_snapshot, unit,
+               direction, qty, source_type, source_ref, performed_by, note)
+            VALUES (\$1, \$2, \$3, NULL, \$4, \$5, 'in', \$6, 'transfer_in', \$7::text, \$8, \$9)
+            ''',
+            parameters: [
+              destWarehouseId, outItemType, outItemId, outItem['name'], outUnit,
+              outputQty, transferId, uid, 'Qadoqlash #$batchId',
+            ],
+          );
+          await db.execute(
+            'UPDATE fh.stock_transfers SET status = \'confirmed\', confirmed_by = \$1, confirmed_at = now() WHERE id = \$2',
+            parameters: [uid, transferId],
+          );
+          await db.execute(
+            'UPDATE fh.production_batches SET status = \'completed\', completed_at = now() WHERE id = \$1 AND status = \'in_progress\'',
+            parameters: [batchId],
+          );
+
           String? warning;
           if (empId != null) {
             warning = await _autoCreateWorkRecord(
@@ -3823,7 +3848,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
 
           await db.execute('COMMIT');
           return _json({
-            'message': 'Qadoqlash boshlandi. Natija qabul qiluvchi ombor tasdiqlashini kutmoqda.',
+            'message': 'Qadoqlash yakunlandi. Natija tanlangan tayyor mahsulot omboriga darhol o\'tdi.',
             'batchId': batchId,
             'transferId': transferId,
             'outputItemName': outItem['name'],
@@ -3831,7 +3856,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             'outputUnit': outUnit,
             'sourceWarehouseName': srcName,
             'destWarehouseName': dstName,
-            'pending': true,
+            'pending': false,
             if (empId != null) 'employeeId': empId,
             if (warning != null) 'warning': warning,
           }, status: 201);

@@ -319,23 +319,19 @@ Future<void> main() async {
 
   semiBal = await balance(c, whSemi, 'semi_finished', iSemi);
   final pkgBal = await balance(c, whPkg, 'packaging', iPkg);
-  final finBal0 = await balance(c, whFin, 'finished', iFin);
+  final finBal1 = await balance(c, whFin, 'finished', iFin);
   check('packaging consume semi 60->58', semiBal == 58, 'semi=$semiBal');
   check('packaging consume pkg 50->48', pkgBal == 48, 'pkg=$pkgBal');
-  check('fin not added before confirm', finBal0 == 0, 'fin=$finBal0');
+  check('fin added immediately 0->10', finBal1 == 10, 'fin=$finBal1');
 
   final trSrc3 = await c.execute(
-      'SELECT source_warehouse_id FROM fh.stock_transfers WHERE id = \$1', parameters: [t3]);
+      'SELECT source_warehouse_id, status FROM fh.stock_transfers WHERE id = \$1', parameters: [t3]);
   check('packaging transfer source=semi (filled)', trSrc3.isNotEmpty && (trSrc3.first[0] as num).toInt() == whSemi, '$trSrc3');
+  check('packaging transfer auto-confirmed', trSrc3.isNotEmpty && trSrc3.first[1] == 'confirmed', '$trSrc3');
 
-  (s, j) = await call('GET', '/transfers/pending?warehouse_id=$whFin', tokenStr: adminTok);
-  pend = (j['transfers'] as List);
-  check('pending whFin has t3', pend.any((e) => (e as Map)['id'] == t3), '$pend');
-
-  (s, _) = await call('POST', '/transfers/$t3/confirm', tokenStr: adminTok);
-  check('confirm t3 200', s == 200, 'status=$s');
-  final finBal1 = await balance(c, whFin, 'finished', iFin);
-  check('fin added 0->10', finBal1 == 10, 'fin=$finBal1');
+  final batchPack = await c.execute(
+      'SELECT status FROM fh.production_batches WHERE transfer_id = \$1', parameters: [t3]);
+  check('packaging batch completed', batchPack.isNotEmpty && batchPack.first[0] == 'completed', '$batchPack');
 
   // ── 5. REJECT with source -> reverse ────────────────────────────────────
   final trS = await c.execute(
