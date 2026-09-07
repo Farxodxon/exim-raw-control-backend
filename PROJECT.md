@@ -383,4 +383,4 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 
 ## 12. Frontend repo
 
-Flutter frontend: [Farxodxon/factory_hub](https://github.com/Farxodxon/factory_hub) — push ⇒ avtomatik build. Backend commit `8469e88` (2026-09-06).
+Flutter frontend: [Farxodxon/factory_hub](https://github.com/Farxodxon/factory_hub) — push ⇒ avtomatik build. Frontend commit `19de098` (2026-09-07).
