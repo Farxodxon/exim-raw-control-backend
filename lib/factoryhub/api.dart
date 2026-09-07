@@ -981,7 +981,8 @@ var result;
         if (!_fullAccess(role) && userId != null) {
           result = await db.execute(
             '''SELECT w.id, w.name, w.type, w.is_active, w.created_at,
-                     w.can_analyze, w.can_transfer, w.can_income, w.can_expense
+                     w.can_analyze, w.can_transfer, w.can_income, w.can_expense,
+                     w.fixed_route_to_id
                FROM fh.warehouses w
                JOIN fh.user_warehouses uw ON uw.warehouse_id = w.id
                WHERE uw.user_id = \$1
@@ -990,7 +991,7 @@ var result;
           );
         } else {
           result = await db.execute(
-            'SELECT id, name, type, is_active, created_at, can_analyze, can_transfer, can_income, can_expense FROM fh.warehouses ORDER BY id',
+            'SELECT id, name, type, is_active, created_at, can_analyze, can_transfer, can_income, can_expense, fixed_route_to_id FROM fh.warehouses ORDER BY id',
           );
         }
 
@@ -1015,8 +1016,9 @@ var result;
             'canAnalyze': row[5] ?? true,
             'canTransfer': row[6] ?? false,
             'canIncome': row[7] ?? true,
-            'canExpense': row[8] ?? true,
+'canExpense': row[8] ?? true,
             'transferTo': routesResult.map((r) => r[0]).toList(),
+            'fixedTransferTo': row[9],
             'itemCount': countResult.isNotEmpty ? countResult.first[0] : 0,
           });
         }
@@ -1050,11 +1052,12 @@ var result;
           return _json({'error': "type noto'g'ri"}, status: 400);
         }
 
-        final canAnalyze = body['canAnalyze'] as bool? ?? true;
+final canAnalyze = body['canAnalyze'] as bool? ?? true;
         final canTransfer = body['canTransfer'] as bool? ?? false;
         final canIncome = body['canIncome'] as bool? ?? true;
         final canExpense = body['canExpense'] as bool? ?? true;
         final transferTo = (body['transferTo'] as List?)?.map((e) => int.tryParse('$e')).whereType<int>().toList() ?? <int>[];
+        int? fixedRouteTo = int.tryParse(body['fixedTransferTo']?.toString() ?? '');
 
         final db = await DatabaseConnection.getConnection();
         await db.execute('BEGIN');
@@ -1078,6 +1081,12 @@ var result;
             }
           }
         }
+        if (fixedRouteTo != null && canTransfer && transferTo.contains(fixedRouteTo) && fixedRouteTo != newId) {
+          await db.execute(
+            'UPDATE fh.warehouses SET fixed_route_to_id = \$1 WHERE id = \$2',
+            parameters: [fixedRouteTo, newId],
+          );
+        }
         await db.execute('COMMIT');
 
         return _json({
@@ -1087,6 +1096,7 @@ var result;
             'canAnalyze': canAnalyze, 'canTransfer': canTransfer,
             'canIncome': canIncome, 'canExpense': canExpense,
             'transferTo': transferTo,
+            'fixedTransferTo': (fixedRouteTo != null && transferTo.contains(fixedRouteTo)) ? fixedRouteTo : null,
           },
         }, status: 201);
       } catch (e) {
@@ -1119,18 +1129,25 @@ var result;
         final canTransfer = body['canTransfer'] as bool? ?? false;
         final canIncome = body['canIncome'] as bool? ?? true;
         final canExpense = body['canExpense'] as bool? ?? true;
-        final transferTo = (body['transferTo'] as List?)
+final transferTo = (body['transferTo'] as List?)
                 ?.map((e) => int.tryParse('$e'))
                 .whereType<int>()
                 .where((t) => t != warehouseId)
                 .toList() ??
             <int>[];
+        final fixedRouteTo =
+            int.tryParse(body['fixedTransferTo']?.toString() ?? '');
+        // Qat'iy sherik faqat ruxsat etilgan transferTo ichidan bo'lishi mumkin.
+        final validFixed = (fixedRouteTo != null && canTransfer &&
+                transferTo.contains(fixedRouteTo))
+            ? fixedRouteTo
+            : null;
 
         await db.execute('BEGIN');
         await db.execute(
           'UPDATE fh.warehouses SET can_analyze = \$1, can_transfer = \$2, '
-          'can_income = \$3, can_expense = \$4 WHERE id = \$5',
-          parameters: [canAnalyze, canTransfer, canIncome, canExpense, warehouseId],
+          'can_income = \$3, can_expense = \$4, fixed_route_to_id = \$5 WHERE id = \$6',
+          parameters: [canAnalyze, canTransfer, canIncome, canExpense, validFixed, warehouseId],
         );
         await db.execute(
           'DELETE FROM fh.warehouse_transfer_routes WHERE from_warehouse_id = \$1',
@@ -1153,13 +1170,14 @@ var result;
         }
         await db.execute('COMMIT');
 
-        return _json({
+return _json({
           'message': 'Ombor yangilandi',
           'warehouse': {
             'id': warehouseId,
             'canAnalyze': canAnalyze, 'canTransfer': canTransfer,
             'canIncome': canIncome, 'canExpense': canExpense,
             'transferTo': transferTo,
+            'fixedTransferTo': validFixed,
           },
         });
       } catch (e) {
@@ -1256,8 +1274,8 @@ var result;
           }
         }
 
-        final infoResult = await db.execute(
-          'SELECT name, type, is_active, created_at, can_analyze, can_transfer, can_income, can_expense '
+final infoResult = await db.execute(
+          'SELECT name, type, is_active, created_at, can_analyze, can_transfer, can_income, can_expense, fixed_route_to_id '
           'FROM fh.warehouses WHERE id = \$1',
           parameters: [warehouseId],
         );
@@ -1265,6 +1283,13 @@ var result;
           return _json({'error': 'Topilmadi'}, status: 404);
         }
         final info = infoResult.first;
+        final fixedToId = info[8] as int?;
+        String? fixedToName;
+        if (fixedToId != null) {
+          final fx = await db.execute(
+            'SELECT name FROM fh.warehouses WHERE id = \$1', parameters: [fixedToId]);
+          if (fx.isNotEmpty) fixedToName = fx.first[0] as String?;
+        }
 
 final routesResult = await db.execute(
           'SELECT r.to_warehouse_id, w.name '
@@ -1320,6 +1345,8 @@ final routesResult = await db.execute(
             'transferToWarehouses': routesResult.map((r) => {
               'id': r[0], 'name': r[1],
             }).toList(),
+            'fixedTransferTo': fixedToId,
+            'fixedTransferToWarehouse': fixedToName,
           },
           'stock': stockResult.map((row) => {
             'itemType': row[0], 'refKey': row[1], 'name': row[2],
@@ -1887,6 +1914,17 @@ get('/transfers', (Request request) async {
         }
 
         // Ruxsat etilgan yo'nalish (warehouse_transfer_routes).
+        final fixedRow = await db.execute(
+          'SELECT fixed_route_to_id FROM fh.warehouses WHERE id = \$1',
+          parameters: [srcId],
+        );
+        final fixedTo =
+            fixedRow.isNotEmpty ? (fixedRow.first[0] as int?) : null;
+        if (fixedTo != null && fixedTo != destId) {
+          return _json({
+            'error': 'Bu ombor qat\'iy belgilangan omborga transfer qilinadi — manzilni tanlash mumkin emas'
+          }, status: 403);
+        }
         final route = await db.execute(
           'SELECT 1 FROM fh.warehouse_transfer_routes '
           'WHERE from_warehouse_id = \$1 AND to_warehouse_id = \$2',
@@ -2104,9 +2142,21 @@ if (info.isEmpty) return _json({'error': 'Topilmadi'}, status: 404);
           return _json({'error': 'Ombor topilmadi'}, status: 404);
         }
         // Jo'natuvchi ombor uchun transfer imkoniyati yoqilgan bo'lishi kerak.
-        if (!(whCanTransfer[fromId] ?? false)) {
+if (!(whCanTransfer[fromId] ?? false)) {
           return _json({
             'error': 'Bu ombor uchun transfer imkoniyati yoqilmagan',
+          }, status: 403);
+        }
+        // Qat'iy tayinlangan ombor bo'lsa — faqat unga transfer ruxsat etiladi.
+        final fixedRow = await db.execute(
+          'SELECT fixed_route_to_id FROM fh.warehouses WHERE id = \$1',
+          parameters: [fromId],
+        );
+        final fixedTo =
+            fixedRow.isNotEmpty ? (fixedRow.first[0] as int?) : null;
+        if (fixedTo != null && fixedTo != toId) {
+          return _json({
+            'error': 'Bu ombor qat\'iy belgilangan omborga transfer qilinadi — manzilni tanlash mumkin emas'
           }, status: 403);
         }
         // Ruxsat etilgan yo'nalish (warehouse_transfer_routes) mavjud bo'lishi shart.
@@ -3665,8 +3715,26 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
           if (!ok) shortages.add({'name': name, 'unit': unit, 'needed': need, 'available': available, 'group': isPkg ? 'packaging' : 'semi_finished'});
         }
 
-        final finished = await db.execute(
-          'SELECT id, name FROM fh.warehouses WHERE type = \'finished\' AND is_active ORDER BY id');
+        // Tayyor mahsulot omborlari — faqat yarim tayyor omborining ruxsat
+        // etilgan sheriklari (routes) ichidan. Tanlov mamnuniyati backendda.
+        final fixedSem = await db.execute(
+          'SELECT fixed_route_to_id FROM fh.warehouses WHERE id = \$1',
+          parameters: [semiId],
+        );
+        final semiFixed = fixedSem.isNotEmpty ? (fixedSem.first[0] as int?) : null;
+        final routedFin = semiFixed != null
+            ? await db.execute(
+                'SELECT id, name FROM fh.warehouses WHERE id = \$1 AND type = \'finished\' AND is_active',
+                parameters: [semiFixed])
+            : await db.execute(
+                'SELECT w.id, w.name FROM fh.warehouse_transfer_routes r '
+                'JOIN fh.warehouses w ON w.id = r.to_warehouse_id '
+                'WHERE r.from_warehouse_id = \$1 AND w.type = \'finished\' AND w.is_active ORDER BY w.id',
+                parameters: [semiId]);
+        final finished = routedFin.isNotEmpty
+            ? routedFin
+            : await db.execute(
+                'SELECT id, name FROM fh.warehouses WHERE type = \'finished\' AND is_active ORDER BY id');
 
         return _json({
           'result': shortages.isEmpty ? 'ok' : 'shortage',
@@ -3734,6 +3802,38 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         final pkgId = await _defaultWarehouseId(db, 'packaging');
         if (semiId == null || pkgId == null) {
           return _json({'error': 'Yarim tayyor yoki qadoqlash materiallari ombori belgilanmagan'}, status: 422);
+        }
+        // Qat'iy/tayinlangan sherik tekshiruvi — packaging natijasi faqat
+        // yarim tayyor omborining ruxsat etilgan tayyor omborlariga o'tadi.
+        final fixedSem = await db.execute(
+          'SELECT fixed_route_to_id FROM fh.warehouses WHERE id = \$1',
+          parameters: [semiId],
+        );
+        final semiFixed = fixedSem.isNotEmpty ? (fixedSem.first[0] as int?) : null;
+        if (semiFixed != null && semiFixed != destWarehouseId) {
+          return _json({'error': 'Qadoqlash natijasi qat\'iy belgilangan tayyor mahsulot omboriga o\'tadi'}, status: 403);
+        }
+        if (semiFixed == null) {
+          final okRoute = await db.execute(
+            'SELECT 1 FROM fh.warehouse_transfer_routes r '
+            'JOIN fh.warehouses w ON w.id = r.to_warehouse_id '
+            'WHERE r.from_warehouse_id = \$1 AND r.to_warehouse_id = \$2 '
+            'AND w.type = \'finished\' AND w.is_active',
+            parameters: [semiId, destWarehouseId],
+          );
+          if (okRoute.isNotEmpty) {
+            // ruxsat etilgan tayinlangan sherik — ok
+          } else {
+            final hasFinRoutes = await db.execute(
+              'SELECT 1 FROM fh.warehouse_transfer_routes r '
+              'JOIN fh.warehouses w ON w.id = r.to_warehouse_id '
+              'WHERE r.from_warehouse_id = \$1 AND w.type = \'finished\' AND w.is_active LIMIT 1',
+              parameters: [semiId],
+            );
+            if (hasFinRoutes.isNotEmpty) {
+              return _json({'error': 'Bu ombor qadoqlash natijasini qabul qilishga tayinlanmagan'}, status: 403);
+            }
+          }
         }
         final srcName = (await db.execute(
           'SELECT name FROM fh.warehouses WHERE id = \$1', parameters: [semiId])).first[0] as String;

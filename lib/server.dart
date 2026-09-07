@@ -141,6 +141,9 @@ void main() async {
       await conn.execute('''
         ALTER TABLE fh.warehouses ADD COLUMN IF NOT EXISTS can_expense BOOLEAN DEFAULT true
       ''');
+      await conn.execute('''
+        ALTER TABLE fh.warehouses ADD COLUMN IF NOT EXISTS fixed_route_to_id INTEGER REFERENCES fh.warehouses(id)
+      ''');
       print('✅ fh.warehouses capability columns ensured');
     } catch (e) { print('⚠️ fh.warehouses capability columns error: $e'); }
     try {

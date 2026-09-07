@@ -592,6 +592,111 @@ Future<void> main() async {
   semiBal = await balance(c, whSemi, 'semi_finished', iSemi);
   check('semi confirmda 78->73', semiBal == 73, 'semi=$semiBal');
 
+  // ── 10. QAT'IY TRANSFER YO'NALISh (fixed route) ────────────────────────
+  // whSemi sozlamalari (PUT uchun mavjud qiymatlar)
+  (s, j) = await call('GET', '/warehouses/$whSemi', tokenStr: adminTok);
+  check('fixed: wh detail 200', s == 200, 'status=$s $j');
+  final whDetailPre = j['warehouse'] as Map;
+  final curAnalyze = whDetailPre['canAnalyze'] == true;
+  final curIncome = whDetailPre['canIncome'] == true;
+  final curExpense = whDetailPre['canExpense'] == true;
+
+  // whSemi -> whFin qat'iy tayinlanadi
+  (s, j) = await call('PUT', '/warehouses/$whSemi', body: {
+    'canAnalyze': curAnalyze, 'canTransfer': true, 'canIncome': curIncome,
+    'canExpense': curExpense, 'transferTo': [whFin], 'fixedTransferTo': whFin,
+  }, tokenStr: adminTok);
+  check('fixed: set route PUT 200', s == 200, 'status=$s $j');
+  check('fixed: PUT echoed fixedTransferTo', (j['warehouse'] as Map)['fixedTransferTo'] == whFin, '$j');
+
+  (s, j) = await call('GET', '/warehouses/$whSemi', tokenStr: adminTok);
+  final dFixed = j['warehouse'] as Map;
+  check('fixed: detail fixedTransferTo', dFixed['fixedTransferTo'] == whFin, '$j');
+  check('fixed: detail fixed name', (dFixed['fixedTransferToWarehouse'] as String?)?.isNotEmpty ?? false, '$j');
+  check('fixed: detail routes faqat fin', (dFixed['transferToWarehouses'] as List).length == 1
+      && (dFixed['transferToWarehouses'] as List).first['id'] == whFin, '$j');
+
+  (s, j) = await call('GET', '/warehouses', tokenStr: adminTok);
+  final whRow = (j['warehouses'] as List).where((e) => (e as Map)['id'] == whSemi).toList();
+  check('fixed: warehouses list fixedTransferTo', whRow.isNotEmpty
+      && (whRow.first as Map)['fixedTransferTo'] == whFin, '$j');
+
+  // /transfers/send: qat'iy belgidan boshqa manzilga 403
+  (s, j) = await call('POST', '/transfers/send', body: {
+    'item_id': iSemi, 'quantity': 1, 'unit': 'paket',
+    'source_warehouse_id': whSemi, 'dest_warehouse_id': whQuar,
+  }, tokenStr: adminTok);
+  check('fixed: send not-fixed dest 403', s == 403, 'status=$s $j');
+  // Qat'iy manzilga 201 + confirm
+  (s, j) = await call('POST', '/transfers/send', body: {
+    'item_id': iSemi, 'quantity': 1, 'unit': 'paket',
+    'source_warehouse_id': whSemi, 'dest_warehouse_id': whFin,
+  }, tokenStr: adminTok);
+  check('fixed: send fixed dest 201', s == 201, 'status=$s $j');
+  final tFixed = (j['transferId'] as num?)?.toInt();
+  (s, _) = await call('POST', '/transfers/$tFixed/confirm', tokenStr: adminTok);
+  check('fixed: send confirm 200', s == 200, 'status=$s');
+
+  // Legacy POST /transfers ham qat'iy yo'nalishga bo'ysunadi
+  (s, j) = await call('POST', '/transfers', body: {
+    'from_warehouse_id': whSemi, 'to_warehouse_id': whQuar,
+    'items': [{'item_type': 'semi_finished', 'ref_id': iSemi,
+               'name': 'E2E Yarim tayyor', 'unit': 'paket', 'qty': 1}],
+  }, tokenStr: adminTok);
+  check('fixed: legacy wrong dest 403', s == 403, 'status=$s $j');
+
+  // Packaging preview — finishedWarehouses qat'iy/routes bo'yicha cheklanadi
+  (s, j) = await call('GET', '/production/packaging/preview?bom_id=$idBomPk&output_quantity=10',
+      tokenStr: adminTok);
+  var finListP = (j['finishedWarehouses'] as List);
+  check('fixed: packaging preview faqat qat\'iy fin', finListP.length == 1
+      && (finListP.first as Map)['id'] == whFin, '$j');
+
+  // Qat'iy olib tashlanadi; routes'da faqat whFin qoladi -> preview hali ham [fin]
+  (s, j) = await call('PUT', '/warehouses/$whSemi', body: {
+    'canAnalyze': curAnalyze, 'canTransfer': true, 'canIncome': curIncome,
+    'canExpense': curExpense, 'transferTo': [whFin], 'fixedTransferTo': null,
+  }, tokenStr: adminTok);
+  check('fixed: clear fixed PUT 200', s == 200, 'status=$s $j');
+  (s, j) = await call('GET', '/production/packaging/preview?bom_id=$idBomPk&output_quantity=10',
+      tokenStr: adminTok);
+  finListP = (j['finishedWarehouses'] as List);
+  check('fixed: preview routes-only [fin]', finListP.length == 1
+      && (finListP.first as Map)['id'] == whFin, '$j');
+
+  // Tayinlangan manzilga packaging start ishlaydi
+  (s, j) = await call('POST', '/production/packaging/start', body: {
+    'bom_id': idBomPk, 'output_quantity': 10, 'dest_warehouse_id': whFin,
+  }, tokenStr: adminTok);
+  check('fixed: packaging start designated dest 201', s == 201, 'status=$s $j');
+
+  // Tayinlanmagan (yangicha yaratilgan) finished omboriga start -> 403
+  (s, j) = await call('POST', '/warehouses', body: {
+    'name': 'E2E % Vaqtinchalik Fin', 'type': 'finished',
+    'canAnalyze': true, 'canTransfer': false, 'canIncome': true, 'canExpense': true,
+    'transferTo': <int>[],
+  }, tokenStr: adminTok);
+  check('fixed: temp fin wh created 201', s == 201, 'status=$s $j');
+  final tempFin = (j['warehouse']['id'] as num?)?.toInt();
+  check('fixed: temp fin id', tempFin != null, '$j');
+  if (tempFin != null) {
+    (s, j) = await call('POST', '/production/packaging/start', body: {
+      'bom_id': idBomPk, 'output_quantity': 10, 'dest_warehouse_id': tempFin,
+    }, tokenStr: adminTok);
+    check('fixed: packaging start not-designated 403', s == 403, 'status=$s $j');
+    (s, _) = await call('DELETE', '/warehouses/$tempFin', tokenStr: adminTok);
+    check('fixed: temp fin deleted', s == 200, 'status=$s');
+  }
+
+  // transferTo tarkibida bo'lmagan ombor qat'iy tanlansa — bekor qilinadi
+  (s, j) = await call('PUT', '/warehouses/$whSemi', body: {
+    'canAnalyze': curAnalyze, 'canTransfer': true, 'canIncome': curIncome,
+    'canExpense': curExpense, 'transferTo': [whFin], 'fixedTransferTo': whSales,
+  }, tokenStr: adminTok);
+  check('fixed: invalid fixed dropped', (j['warehouse'] as Map)['fixedTransferTo'] == null, '$j');
+  (s, j) = await call('GET', '/warehouses/$whSemi', tokenStr: adminTok);
+  check('fixed: invalid fixed cleared in detail', (j['warehouse'] as Map)['fixedTransferTo'] == null, '$j');
+
   // ── FINAL ──────────────────────────────────────────────────────────────
   await cleanup();
 
