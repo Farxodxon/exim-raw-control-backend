@@ -357,6 +357,7 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 
 | Sana | Commit | Tavsif |
 |---|---|---|
+| 2026-09-07 | `96394c2` | **Qadoqlash darhol o'tishi:** /production/packaging/start endi natijani tanlangan tayyor mahsulot omboriga **darhol** o'tkazadi (transfer auto-confirmed, partiya completed, pending=false) — qabul qiluvchi ombor tasdig'ini kutmaydi. E2E yangilandi (104/104) |
 | 2026-09-07 | `10c1f7a` | **Dashboard statistika:** totalEmployees + dealerWarehouses, activeWarehouses/batchesInProgress olib tashlandi; **Tekshiruv:** approve yarim tayyor → yarim tayyor ombori, xom ashyo → xom ombori (item_type bo'yicha, destType javobda) |
 | 2026-09-06 | `95c697d` | **Davomat overtime:** attendance.overtime_hours (manual), ish vaqti 8h cap (obed bilan), monthly total_overtime_hours |
 | 2026-09-06 | `a4bfabd` | **BOM employee_id:** /production/bom/start ga employee_id qo'shildi, avtomatik work_record, warning javobda |
@@ -383,4 +384,4 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 
 ## 12. Frontend repo
 
-Flutter frontend: [Farxodxon/factory_hub](https://github.com/Farxodxon/factory_hub) — push ⇒ avtomatik build. Frontend commit `19de098` (2026-09-07).
+Flutter frontend: [Farxodxon/factory_hub](https://github.com/Farxodxon/factory_hub) — push ⇒ avtomatik build. Frontend commit `e710fde` (2026-09-07): Qadoqlash matni yangilandi; Yangi mahsulot (to'liq tarkib) 3 bosqichli wizard — finished item + aralashtirish retsepti + qadoqlash retsepti birgalikda.
