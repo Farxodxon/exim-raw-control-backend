@@ -4130,7 +4130,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         final result = await db.execute(
           '''
           SELECT i.id, i.item_id, it.name AS item_name, i.unit, i.quantity,
-                 i.quarantine_warehouse_id, w.name AS wh_name, i.created_at, i.note
+                 i.quarantine_warehouse_id, w.name AS wh_name, i.created_at, i.note, it.item_type
           FROM fh.inspections i
           JOIN fh.items it ON it.id = i.item_id
           JOIN fh.warehouses w ON w.id = i.quarantine_warehouse_id
@@ -4144,7 +4144,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             'id': r[0], 'itemId': r[1], 'itemName': r[2], 'unit': r[3],
             'quantity': r[4]?.toString(),
             'warehouseId': r[5], 'warehouseName': r[6],
-            'createdAt': r[7]?.toString(), 'note': r[8],
+            'createdAt': r[7]?.toString(), 'note': r[8], 'itemType': r[9],
           }).toList(),
         });
       } catch (e) {
@@ -4188,12 +4188,30 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         final item = await _resolveItem(db, itemId, qWhId) ?? <String, dynamic>{'name': 'Mahsulot'};
         final uid = _uid(request);
 
-        // approved → Xom-ashyo ombori, rejected → Brak/nikoz ombori
-        final destType = result == 'approved' ? 'raw' : 'defective';
+        // approved → item turiga qarab: yarim tayyor → semi_finished, aks holda → xom-ashyo
+        // rejected → Brak/nikoz ombori
+        final itemTypeRows = await db.execute(
+          'SELECT item_type FROM fh.items WHERE id = \$1',
+          parameters: [itemId],
+        );
+        final itemType = itemTypeRows.isNotEmpty ? itemTypeRows.first[0] as String? : null;
+        final approvedDestType = itemType == 'semi_finished' ? 'semi_finished' : 'raw';
+        final destType = result == 'approved' ? approvedDestType : 'defective';
         final destId = await _defaultWarehouseId(db, destType);
         if (destId == null) {
-          return _json({'error': result == 'approved' ? 'Xom-ashyo ombori topilmadi' : 'Brak/nikoz ombori topilmadi'}, status: 422);
+          return _json({
+            'error': result == 'approved'
+                ? (itemType == 'semi_finished'
+                    ? 'Yarim tayyor ombori topilmadi'
+                    : 'Xom-ashyo ombori topilmadi')
+                : 'Brak/nikoz ombori topilmadi'
+          }, status: 422);
         }
+        final destRows = await db.execute(
+          'SELECT name FROM fh.warehouses WHERE id = \$1',
+          parameters: [destId],
+        );
+        final destName = destRows.isNotEmpty ? destRows.first[0] as String? : null;
 
         await db.execute('BEGIN');
         try {
@@ -4233,10 +4251,15 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
           );
           await db.execute('COMMIT');
           return _json({
-            'message': result == 'approved' ? 'Tasdiqlandi, Xom-ashyo omboriga yo\'naltirildi' : 'Rad etildi, Brak/nikoz omboriga yo\'naltirildi',
+            'message': result == 'approved'
+                ? 'Tasdiqlandi, $destName omboriga yo\'naltirildi'
+                : 'Rad etildi, Brak/nikoz omboriga yo\'naltirildi',
             'inspectionId': inspectionId,
             'transferId': transferId,
             'destWarehouseId': destId,
+            'destWarehouseName': destName,
+            'destType': destType,
+            'itemType': itemType,
           });
         } catch (e) {
           await db.execute('ROLLBACK');
@@ -4505,16 +4528,16 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
       try {
         final db = await DatabaseConnection.getConnection();
 
-        final counts = await db.execute('''
+final counts = await db.execute('''
           SELECT
             (SELECT COUNT(*) FROM fh.users WHERE is_active),
-            (SELECT COUNT(*) FROM fh.warehouses WHERE is_active),
             (SELECT COUNT(*) FROM fh.plans WHERE status IN ('planned','in_progress')),
-            (SELECT COUNT(*) FROM fh.production_batches WHERE status = 'in_progress'),
             (SELECT COUNT(*) FROM fh.supplier_orders WHERE status IN ('ordered','in_transit')),
             (SELECT COUNT(*) FROM public.partners WHERE faolligi),
             (SELECT COUNT(*) FROM public.products),
-            (SELECT COUNT(*) FROM public.raw_materials)
+            (SELECT COUNT(*) FROM public.raw_materials),
+            (SELECT COUNT(*) FROM fh.employees WHERE status = 'active'),
+            (SELECT COUNT(*) FROM fh.warehouses WHERE type = 'dealer')
         ''');
         final c = counts.first;
 
@@ -4544,15 +4567,15 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         }
 
         return _json({
-          'stats': {
+'stats': {
             'activeUsers': c[0],
-            'activeWarehouses': c[1],
-            'openPlans': c[2],
-            'batchesInProgress': c[3],
-            'pendingSupplierOrders': c[4],
-            'activePartners': c[5],
-            'totalProducts': c[6],
-            'totalRawMaterials': c[7],
+            'openPlans': c[1],
+            'pendingSupplierOrders': c[2],
+            'activePartners': c[3],
+            'totalProducts': c[4],
+            'totalRawMaterials': c[5],
+            'totalEmployees': c[6],
+            'dealerWarehouses': c[7],
           },
           'lowStockCount': lowStock.length,
           'lowStock': lowStock.map((row) => {
