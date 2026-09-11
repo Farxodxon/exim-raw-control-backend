@@ -792,6 +792,129 @@ Future<void> main() async {
   (s, _) = await call('DELETE', '/dealers/$d2Id', tokenStr: adminTok);
   check('dealers: export delete empty', s == 200, 'status=$s');
 
+  // ── GPS / SELF-CHECKIN / AUDIT / UNMARKED ──────────────────────────────────
+
+  // GPS joylashuvi: "Asosiy ofis" (41.311081, 69.240562, radius=200).
+  // /hr/attendance/me — bog'lanmagan user uchun 403 (xodim talab qilinadi).
+  (s, j) = await call('GET', '/hr/attendance/me', tokenStr: adminTok);
+  check('gps: /hr/attendance/me no-employee 403', s == 403, 'status=$s $j');
+
+  // Xodim yaratish va linklash (employee role bilan).
+  final empUser = await c.execute(
+    "INSERT INTO fh.users (username, email, password, role) "
+    "VALUES ('e2e_gps_test', 'e2e_gps@test.uz', 'pass123', 'employee') "
+    "RETURNING id",
+  );
+  final empUserId = (empUser.first[0] as num).toInt();
+
+  // Xodim yaratish + link.
+  final empRow = await c.execute(
+    "INSERT INTO fh.employees (full_name, position, department, phone, pay_type, base_salary, user_id, status) "
+    "VALUES ('GPS Test Xodim', 'Test', 'Test', '999999999', 'salary', 100000, \$1, 'active') "
+    "RETURNING id",
+    parameters: [empUserId],
+  );
+  final empId = (empRow.first[0] as num).toInt();
+  final empTok = token(userId: empUserId, role: 'employee');
+
+  // Xodim uchun 'hr' moduli granti.
+  await c.execute(
+    "INSERT INTO fh.user_modules (user_id, module_key) VALUES (\$1, 'hr') ON CONFLICT DO NOTHING",
+    parameters: [empUserId],
+  );
+
+  // Self-checkin (in) — GPS radius ichida: 41.311081, 69.240562 (radius 200m).
+  (s, j) = await call('POST', '/hr/attendance/self-checkin', body: {
+    'type': 'in',
+    'lat': 41.311081,
+    'lng': 69.240562,
+  }, tokenStr: empTok);
+  check('self-checkin: in within radius 200', s == 200, 'status=$s $j');
+
+  // Self-checkin (in) yana — 409 (allaqachon belgilangan).
+  (s, j) = await call('POST', '/hr/attendance/self-checkin', body: {
+    'type': 'in',
+    'lat': 41.311081,
+    'lng': 69.240562,
+  }, tokenStr: empTok);
+  check('self-checkin: in duplicate 409', s == 409, 'status=$s $j');
+
+  // Self-checkin (out) — GPS radius ichida.
+  (s, j) = await call('POST', '/hr/attendance/self-checkin', body: {
+    'type': 'out',
+    'lat': 41.311081,
+    'lng': 69.240562,
+  }, tokenStr: empTok);
+  check('self-checkin: out within radius 200', s == 200, 'status=$s $j');
+
+  // Self-checkin (in) — GPS radius tashqarida (~1.1km: +0.01 lat ≈ 1.1km).
+  (s, j) = await call('POST', '/hr/attendance/self-checkin', body: {
+    'type': 'in',
+    'lat': 41.321081,  // ~1.1km shimolda
+    'lng': 69.240562,
+  }, tokenStr: empTok);
+  check('self-checkin: in outside radius 400',
+      s == 400 && (j['error'] as String? ?? '').contains("ofis hududida emas"),
+      'status=$s $j');
+
+  // Unmarked: hali davomat kiritilmagan xodimlar.
+  final today = DateTime.now().toIso8601String().substring(0, 10);
+  (s, j) = await call('GET', '/hr/attendance/unmarked?date=$today', tokenStr: adminTok);
+  check('unmarked: 200 + has selfMarked', s == 200
+      && (j['selfMarked'] as List).isNotEmpty, 'status=$s $j');
+
+  // /hr/attendance/me — xodimning o'z holati.
+  (s, j) = await call('GET', '/hr/attendance/me', tokenStr: empTok);
+  check('me: 200 + attendance not null', s == 200
+      && j['attendance'] != null
+      && j['attendance']['markedBy'] == 'self', 'status=$s $j');
+
+  // GET /hr/attendance — admin ko'radi; employee faqat o'zini.
+  (s, j) = await call('GET', '/hr/attendance', tokenStr: adminTok);
+  final adminAttCount = (j['attendance'] as List).length;
+  check('admin: attendance list 200', s == 200 && adminAttCount > 0, 'status=$s $j');
+
+  (s, j) = await call('GET', '/hr/attendance', tokenStr: empTok);
+  check('employee: own attendance 200 + count=1', s == 200
+      && (j['attendance'] as List).length == 1, 'status=$s $j');
+
+  // Audit log: avval PUT bilan status o'zgartiramiz.
+  final attRow = await c.execute(
+    "SELECT id FROM fh.attendance WHERE employee_id = \$1 AND work_date = CURRENT_DATE LIMIT 1",
+    parameters: [empId],
+  );
+  final testAttId = (attRow.first[0] as num).toInt();
+
+  (s, j) = await call('PUT', '/hr/attendance/$testAttId', body: {
+    'status': 'late',
+  }, tokenStr: adminTok);
+  check('attendance PUT audit: 200', s == 200, 'status=$s $j');
+  check('attendance PUT audit: isEarlyLeave computed',
+      (j['attendance'] as Map)['isEarlyLeave'] == true, '$j');
+
+  // Audit log tekshirish.
+  (s, j) = await call('GET', '/hr/attendance/$testAttId/audit', tokenStr: adminTok);
+  check('audit: 200 + has entries', s == 200
+      && (j['audit'] as List).isNotEmpty
+      && (j['audit'] as List).first['fieldName'] == 'status', 'status=$s $j');
+
+  // Employee o'z auditini ko'radi.
+  (s, j) = await call('GET', '/hr/attendance/$testAttId/audit', tokenStr: empTok);
+  check('employee: own audit 200', s == 200, 'status=$s $j');
+
+  // Monthly report: daysEarlyLeave mavjud.
+  (s, j) = await call('GET', '/hr/reports/monthly', tokenStr: adminTok);
+  final monthRows = (j['rows'] as List);
+  check('monthly: has rows', s == 200 && monthRows.isNotEmpty, 'status=$s $j');
+
+  // Tozalash: test xodimlarini o'chirish.
+  await c.execute('DELETE FROM fh.attendance_audit_log WHERE attendance_id IN '
+      '(SELECT id FROM fh.attendance WHERE employee_id = \$1)', parameters: [empId]);
+  await c.execute('DELETE FROM fh.attendance WHERE employee_id = \$1', parameters: [empId]);
+  await c.execute('DELETE FROM fh.user_modules WHERE user_id = \$1', parameters: [empUserId]);
+  await c.execute('DELETE FROM fh.employees WHERE id = \$1', parameters: [empId]);
+  await c.execute('DELETE FROM fh.users WHERE id = \$1', parameters: [empUserId]);
+
   // ── FINAL ──────────────────────────────────────────────────────────────
   await cleanup();
 

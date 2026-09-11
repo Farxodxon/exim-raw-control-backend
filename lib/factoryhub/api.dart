@@ -1,4 +1,5 @@
 ﻿import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
 import 'package:shelf_router/shelf_router.dart';
@@ -21,6 +22,19 @@ Response _json(Object? body, {int status = 200}) => Response(
       body: jsonEncode(body),
       headers: {'Content-Type': 'application/json'},
     );
+
+// Ikki koordinata orasidagi masofa (metr) — Haversine formulasi.
+double _haversineMeters(double lat1, double lon1, double lat2, double lon2) {
+  const r = 6371000.0;
+  double rad(double d) => d * math.pi / 180.0;
+  final dLat = rad(lat2 - lat1);
+  final dLon = rad(lon2 - lon1);
+  final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+      math.cos(rad(lat1)) * math.cos(rad(lat2)) *
+          math.sin(dLon / 2) * math.sin(dLon / 2);
+  final c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a));
+  return r * c;
+}
 
 Future<Map<String, dynamic>> _body(Request request) async =>
     jsonDecode(await request.readAsString()) as Map<String, dynamic>;
@@ -718,7 +732,7 @@ post('/setup', (Request request) async {
           return _json({'error': "Rol noto'g'ri"}, status: 400);
         }
 
-        final user = await FhUserStorage.createUser(
+final user = await FhUserStorage.createUser(
           username: username,
           email: email,
           password: password,
@@ -727,6 +741,23 @@ post('/setup', (Request request) async {
         );
         if (user == null) {
           return _json({'error': 'Email band yoki rol xato'}, status: 409);
+        }
+        final db = await DatabaseConnection.getConnection();
+        // Xodim roli: avtomatik 'hr' moduli granti (GPS davomat uchun).
+        if (role == AppRoles.employee) {
+          await db.execute(
+            'INSERT INTO fh.user_modules (user_id, module_key, granted_by) '
+            "VALUES (\$1, 'hr', \$2) ON CONFLICT (user_id, module_key) DO NOTHING",
+            parameters: [user.id, _uid(request)],
+          );
+        }
+        // employee_id berilgan bo'lsa — xodimni yaratilgan loginga bog'laymiz.
+        final employeeId = body['employee_id'] as int?;
+        if (employeeId != null) {
+          await db.execute(
+            'UPDATE fh.employees SET user_id = \$1 WHERE id = \$2',
+            parameters: [user.id, employeeId],
+          );
         }
         return _json(
           {'message': 'Foydalanuvchi yaratildi', 'user': user.toJson()},
@@ -5357,15 +5388,60 @@ if (body['hireDate'] != null) {
       }
     });
 
-    // ───────────────────────── DAVOMAT ─────────────────────────
+// ───────────────────────── DAVOMAT ─────────────────────────
+    // Tizimga kirgan foydalanuvchiga bog'langan faol xodim (employee roli uchun).
+    Future<int?> _ownedEmployeeId(Request request) async {
+      final uid = _uid(request);
+      if (uid == null) return null;
+      final db = await DatabaseConnection.getConnection();
+      final res = await db.execute(
+        "SELECT id FROM fh.employees WHERE user_id = \$1 AND status = 'active' LIMIT 1",
+        parameters: [uid],
+      );
+      return res.isEmpty ? null : res.first[0] as int;
+    }
+
+    // Faol ofis joylashuvi (GPS radius tekshiruvi uchun).
+    Future<Map<String, dynamic>?> _activeFactoryLocation() async {
+      final db = await DatabaseConnection.getConnection();
+      final res = await db.execute(
+        "SELECT id, name, latitude, longitude, radius_meters "
+        "FROM fh.factory_locations WHERE is_active ORDER BY id LIMIT 1",
+      );
+      if (res.isEmpty) return null;
+      return {
+        'id': (res.first[0] as num).toInt(),
+        'name': res.first[1] as String,
+        'lat': double.parse(res.first[2].toString()),
+        'lng': double.parse(res.first[3].toString()),
+        'radius': (res.first[4] as num).toInt(),
+      };
+    }
+
+    // check_out 18:00 dan erta bo'lsa — erta ketish.
+    bool _earlyLeave(String? out) {
+      if (out == null) return false;
+      final p = DateTime.tryParse('2000-01-01 $out');
+      if (p == null) return false;
+      return (p.hour * 60 + p.minute) < 1080;
+    }
+
     get('/hr/attendance', (Request request) async {
-      if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      final isEmp = Policy.isEmployee(_role(request));
+      if (!isEmp && !_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
       try {
         final q = request.url.queryParameters;
         final params = <dynamic>[];
         var where = 'TRUE';
         final empId = int.tryParse(q['employee_id'] ?? '');
-        if (empId != null) {
+        if (isEmp) {
+          final eid = await _ownedEmployeeId(request);
+          if (eid == null) {
+            return _json({'error': 'Tizimga bog\'langan faol xodim topilmadi'}, status: 403);
+          }
+          params.add(eid);
+          where += ' AND a.employee_id = \$${params.length}';
+        } else if (empId != null) {
           params.add(empId);
           where += ' AND a.employee_id = \$${params.length}';
         }
@@ -5378,16 +5454,18 @@ if (body['hireDate'] != null) {
           where += ' AND a.work_date <= \$${params.length}';
         }
         final db = await DatabaseConnection.getConnection();
-final res = await db.execute(
+        final res = await db.execute(
           'SELECT a.id, a.employee_id, a.work_date, a.check_in, a.check_out, '
-          'a.hours_worked, a.overtime_hours, a.status, a.note, a.recorded_by, e.full_name '
+          'a.hours_worked, a.overtime_hours, a.status, a.note, a.recorded_by, '
+          'a.check_in_lat, a.check_in_lng, a.check_out_lat, a.check_out_lng, '
+          'a.marked_by, a.is_early_leave, e.full_name '
           'FROM fh.attendance a JOIN fh.employees e ON e.id = a.employee_id '
           'WHERE ${where} ORDER BY a.work_date DESC, a.employee_id',
           parameters: params,
         );
         final list = res.map((r) {
           final m = AttendanceRecord.fromRow(r).toJson();
-          m['employeeName'] = r[10];
+          m['employeeName'] = r[16];
           return m;
         }).toList();
         return _json({'attendance': list});
@@ -5437,19 +5515,22 @@ final checkIn = body['checkIn'] as String?;
             checkOut?.isEmpty ?? true ? null : checkOut);
         final db = await DatabaseConnection.getConnection();
         try {
-          final res = await db.execute(
-            '''INSERT INTO fh.attendance
-               (employee_id, work_date, check_in, check_out, hours_worked, overtime_hours, status, note, recorded_by)
-               VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)
-               RETURNING id, employee_id, work_date, check_in, check_out,
-                         hours_worked, overtime_hours, status, note, recorded_by''',
-            parameters: [
-              eid, workDate,
-              checkIn?.isEmpty ?? true ? null : checkIn,
-              checkOut?.isEmpty ?? true ? null : checkOut,
-              hours, overtime ?? 0, status, body['note'], _uid(request),
-            ],
-          );
+final res = await db.execute(
+          '''INSERT INTO fh.attendance
+             (employee_id, work_date, check_in, check_out, hours_worked, overtime_hours, status, note, recorded_by, is_early_leave)
+             VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10)
+             RETURNING id, employee_id, work_date, check_in, check_out,
+                       hours_worked, overtime_hours, status, note, recorded_by,
+                       check_in_lat, check_in_lng, check_out_lat, check_out_lng,
+                       marked_by, is_early_leave''',
+          parameters: [
+            eid, workDate,
+            checkIn?.isEmpty ?? true ? null : checkIn,
+            checkOut?.isEmpty ?? true ? null : checkOut,
+            hours, overtime ?? 0, status, body['note'], _uid(request),
+            _earlyLeave(checkOut?.isEmpty ?? true ? null : checkOut),
+          ],
+        );
 return _json({'attendance': AttendanceRecord.fromRow(res.first).toJson()}, status: 201);
         } on PgException catch (e) {
           if (e is ServerException && e.code == '23505') {
@@ -5488,18 +5569,21 @@ final checkIn = m['checkIn'] as String?;
           final overtime = (m['overtimeHours'] as num?)?.toDouble();
           final hours = _hours(checkIn?.isEmpty ?? true ? null : checkIn,
               checkOut?.isEmpty ?? true ? null : checkOut);
-          try {
+try {
             final res = await db.execute(
               '''INSERT INTO fh.attendance
-                 (employee_id, work_date, check_in, check_out, hours_worked, overtime_hours, status, note, recorded_by)
-                 VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9)
+                 (employee_id, work_date, check_in, check_out, hours_worked, overtime_hours, status, note, recorded_by, is_early_leave)
+                 VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10)
                  RETURNING id, employee_id, work_date, check_in, check_out,
-                           hours_worked, overtime_hours, status, note, recorded_by''',
+                           hours_worked, overtime_hours, status, note, recorded_by,
+                           check_in_lat, check_in_lng, check_out_lat, check_out_lng,
+                           marked_by, is_early_leave''',
               parameters: [
                 eid, workDate,
                 checkIn?.isEmpty ?? true ? null : checkIn,
                 checkOut?.isEmpty ?? true ? null : checkOut,
                 hours, overtime ?? 0, status, m['note'], _uid(request),
+                _earlyLeave(checkOut?.isEmpty ?? true ? null : checkOut),
               ],
             );
 inserted.add(AttendanceRecord.fromRow(res.first).toJson());
@@ -5523,7 +5607,7 @@ inserted.add(AttendanceRecord.fromRow(res.first).toJson());
       }
     });
 
-    put('/hr/attendance/<id>', (Request request, String id) async {
+put('/hr/attendance/<id>', (Request request, String id) async {
       if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
       final aid = int.tryParse(id);
       if (aid == null) return _json({'error': 'Noto\'g\'ri id'}, status: 400);
@@ -5532,61 +5616,348 @@ inserted.add(AttendanceRecord.fromRow(res.first).toJson());
         final db = await DatabaseConnection.getConnection();
         // Mavjud qiymatlarni olib, yangilangan in/out bilan hours hisoblaymiz.
         final cur = await db.execute(
-          'SELECT check_in, check_out FROM fh.attendance WHERE id = \$1',
+          'SELECT check_in, check_out, overtime_hours, status, note, '
+          'hours_worked, is_early_leave '
+          'FROM fh.attendance WHERE id = \$1',
           parameters: [aid],
         );
         if (cur.isEmpty) return _json({'error': 'Yozuv topilmadi'}, status: 404);
 
-String? existingIn = _timeToHm(cur.first[0]);
+        String? existingIn = _timeToHm(cur.first[0]);
         String? existingOut = _timeToHm(cur.first[1]);
+        final existingOt = cur.first[2] == null ? null : cur.first[2].toString();
+        final existingStatus = cur.first[3] as String?;
+        final existingNote = cur.first[4] as String?;
         final setParts = <String>[];
         final params = <dynamic>[];
+        // Audit jurnali: (field, old, new) — har bir o'zgarish uchun bitta qator.
+        final audits = <Map<String, String>>[];
         final bodyIn = body['checkIn'] as String?;
         final bodyOut = body['checkOut'] as String?;
         final bodyStatus = body['status'] as String?;
+        final bodyOt = body['overtimeHours'];
 
         bool recalcHours = false;
         if (bodyIn != null) {
-          existingIn = bodyIn;
+          final newVal = bodyIn.isEmpty ? null : bodyIn;
+          final oldVal = existingIn;
+          existingIn = newVal;
           setParts.add('check_in = \$${params.length + 1}');
-          params.add(bodyIn.isEmpty ? null : bodyIn);
+          params.add(newVal);
           if (!bodyIn.isEmpty) recalcHours = true;
+          audits.add({'field': 'check_in', 'old': oldVal ?? '', 'new': newVal ?? ''});
         }
         if (bodyOut != null) {
-          existingOut = bodyOut;
+          final newVal = bodyOut.isEmpty ? null : bodyOut;
+          final oldVal = existingOut;
+          existingOut = newVal;
           setParts.add('check_out = \$${params.length + 1}');
-          params.add(bodyOut.isEmpty ? null : bodyOut);
+          params.add(newVal);
           if (!bodyOut.isEmpty) recalcHours = true;
+          audits.add({'field': 'check_out', 'old': oldVal ?? '', 'new': newVal ?? ''});
         }
-if (recalcHours) {
+        if (recalcHours) {
+          final oldVal = cur.first[5] == null ? null : cur.first[5].toString();
           setParts.add('hours_worked = \$${params.length + 1}');
           params.add(_hours(existingIn, existingOut));
+          audits.add({
+            'field': 'hours_worked',
+            'old': oldVal ?? '',
+            'new': params.last?.toString() ?? '',
+          });
         }
-        if (body['overtimeHours'] != null) {
+        if (bodyOt != null) {
+          final oldVal = existingOt ?? '';
           setParts.add('overtime_hours = \$${params.length + 1}');
-          params.add((body['overtimeHours'] as num).toDouble());
+          params.add((bodyOt as num).toDouble());
+          audits.add({'field': 'overtime_hours', 'old': oldVal, 'new': bodyOt.toString()});
         }
         if (bodyStatus != null) {
+          final oldVal = existingStatus ?? '';
           setParts.add('status = \$${params.length + 1}');
           params.add(bodyStatus);
+          audits.add({'field': 'status', 'old': oldVal, 'new': bodyStatus});
+        }
+        // check_out o'zgarganda erta ketish qayta hisoblanadi.
+        final newOut = (bodyOut != null) ? (bodyOut.isEmpty ? null : bodyOut) : existingOut;
+        final newEarly = _earlyLeave(newOut);
+        final oldEarly = cur.first[6] as bool? ?? false;
+        if (newEarly != oldEarly) {
+          setParts.add('is_early_leave = \$${params.length + 1}');
+          params.add(newEarly);
+          audits.add({'field': 'is_early_leave', 'old': '$oldEarly', 'new': '$newEarly'});
         }
         if (body['note'] != null) {
+          final newVal = body['note'] as String? ?? '';
+          final oldVal = existingNote ?? '';
           setParts.add('note = \$${params.length + 1}');
           params.add(body['note']);
+          audits.add({'field': 'note', 'old': oldVal, 'new': newVal});
         }
         if (setParts.isEmpty) {
           return _json({'error': 'Yangilash uchun maydon kerak'}, status: 400);
+        }
+        // Audit yozuvlari avval saqlanadi (bitta tranzaksiya ketma-ketligida).
+        final changedBy = _uid(request);
+        for (final a in audits) {
+          await db.execute(
+            'INSERT INTO fh.attendance_audit_log '
+            '(attendance_id, changed_by, field_name, old_value, new_value) '
+            'VALUES (\$1, \$2, \$3, \$4, \$5)',
+            parameters: [aid, changedBy, a['field'], a['old'], a['new']],
+          );
         }
         params.add(aid);
         final res = await db.execute(
           'UPDATE fh.attendance SET ${setParts.join(', ')} WHERE id = \$${params.length} '
           'RETURNING id, employee_id, work_date, check_in, check_out, '
-          'hours_worked, overtime_hours, status, note, recorded_by',
+          'hours_worked, overtime_hours, status, note, recorded_by, '
+          'check_in_lat, check_in_lng, check_out_lat, check_out_lng, '
+          'marked_by, is_early_leave',
           parameters: params,
         );
         return _json({'attendance': AttendanceRecord.fromRow(res.first).toJson()});
       } catch (e) {
         print('hr attendance PUT xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ────────────────── DAVOMAT: TARIX (AUDIT) ──────────────────
+    get('/hr/attendance/<id>/audit', (Request request, String id) async {
+      final role = _role(request);
+      final isEmp = Policy.isEmployee(role);
+      if (!isEmp && !_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      final aid = int.tryParse(id);
+      if (aid == null) return _json({'error': 'Noto\'g\'ri id'}, status: 400);
+      try {
+        final db = await DatabaseConnection.getConnection();
+        if (isEmp) {
+          final eid = await _ownedEmployeeId(request);
+          if (eid == null) return _json({'error': 'Ruxsat yo\'q'}, status: 403);
+          final owned = await db.execute(
+            'SELECT 1 FROM fh.attendance WHERE id = \$1 AND employee_id = \$2',
+            parameters: [aid, eid],
+          );
+          if (owned.isEmpty) return _json({'error': 'Ruxsat yo\'q'}, status: 403);
+        }
+        final res = await db.execute(
+          'SELECT l.id, l.attendance_id, l.changed_by, COALESCE(u.username, \'\'), '
+          'l.changed_at, l.field_name, l.old_value, l.new_value '
+          'FROM fh.attendance_audit_log l LEFT JOIN fh.users u ON u.id = l.changed_by '
+          'WHERE l.attendance_id = \$1 ORDER BY l.changed_at DESC, l.id DESC',
+          parameters: [aid],
+        );
+        final list = res.map((r) => {
+              'id': r[0],
+              'attendanceId': r[1],
+              'changedBy': r[2],
+              'changedByName': r[3],
+              'changedAt': (r[4] as DateTime).toIso8601String(),
+              'fieldName': r[5],
+              'oldValue': r[6]?.toString(),
+              'newValue': r[7]?.toString(),
+            }).toList();
+        return _json({'audit': list});
+      } catch (e) {
+        print('hr attendance audit xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ────────────────── DAVOMAT: UNMARKED ──────────────────
+    // Kun oxirida nazoratchi uchun — hali belgilanmagan xodimlar.
+    get('/hr/attendance/unmarked', (Request request) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final date = request.url.queryParameters['date'] ?? '';
+        if (date.isEmpty) return _json({'error': 'date majburiy'}, status: 400);
+        final db = await DatabaseConnection.getConnection();
+        final un = await db.execute(
+          'SELECT e.id, e.full_name, e.position, e.department, e.phone '
+          'FROM fh.employees e WHERE e.status = \'active\' '
+          'AND NOT EXISTS (SELECT 1 FROM fh.attendance a '
+          '  WHERE a.employee_id = e.id AND a.work_date = \$1) '
+          'ORDER BY e.full_name',
+          parameters: [date],
+        );
+        final selfMarked = await db.execute(
+          'SELECT a.id, a.employee_id, a.work_date, a.check_in, a.check_out, '
+          'a.hours_worked, a.overtime_hours, a.status, a.note, a.recorded_by, '
+          'a.check_in_lat, a.check_in_lng, a.check_out_lat, a.check_out_lng, '
+          'a.marked_by, a.is_early_leave, e.full_name '
+          'FROM fh.attendance a JOIN fh.employees e ON e.id = a.employee_id '
+          'WHERE a.work_date = \$1 AND a.marked_by = \'self\' '
+          'ORDER BY e.full_name',
+          parameters: [date],
+        );
+        return _json({
+          'unmarked': un
+              .map((r) => {
+                    'id': r[0],
+                    'fullName': r[1],
+                    'position': r[2],
+                    'department': r[3],
+                    'phone': r[4],
+                  })
+              .toList(),
+          'selfMarked': selfMarked
+              .map((r) => AttendanceRecord.fromRow(r).toJson())
+              .toList(),
+        });
+      } catch (e) {
+        print('hr attendance unmarked xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ────────────────── DAVOMAT: O'Z-O'ZINI BELGILASH ──────────────────
+    // Xodim GPS orqali "keldim/ketdim" bosadi. Haversine + radius tekshiruvi.
+    post('/hr/attendance/self-checkin', (Request request) async {
+      final role = _role(request);
+      if (!Policy.canSelfCheckin(role)) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final type = body['type'] as String?;
+        final lat = body['lat'] is num ? (body['lat'] as num).toDouble() : double.tryParse('${body['lat'] ?? ''}');
+        final lng = body['lng'] is num ? (body['lng'] as num).toDouble() : double.tryParse('${body['lng'] ?? ''}');
+        if (type != 'in' && type != 'out') {
+          return _json({'error': 'type "in" yoki "out" bo\'lishi kerak'}, status: 400);
+        }
+        if (lat == null || lng == null || lat.abs() > 90 || lng.abs() > 180) {
+          return _json({'error': 'lat va lng noto\'g\'ri'}, status: 400);
+        }
+        final db = await DatabaseConnection.getConnection();
+        // Xodimni aniqlash: employee roli o'ziga bog'langan xodim; HR/admin esa employee_id bilan.
+        int? eid;
+        if (Policy.isEmployee(role)) {
+          eid = await _ownedEmployeeId(request);
+          if (eid == null) {
+            return _json({'error': 'Tizimga bog\'langan faol xodim topilmadi'}, status: 403);
+          }
+        } else {
+          eid = body['employee_id'] as int?;
+        }
+        if (eid == null) return _json({'error': 'employee_id majburiy'}, status: 400);
+        final emp = await db.execute(
+          "SELECT 1 FROM fh.employees WHERE id = \$1 AND status = 'active'",
+          parameters: [eid],
+        );
+        if (emp.isEmpty) return _json({'error': 'Faol xodim topilmadi'}, status: 404);
+
+        final loc = await _activeFactoryLocation();
+        if (loc == null) return _json({'error': 'Ofis manzili sozlanmagan'}, status: 500);
+        final dist = _haversineMeters(lat, lng, loc['lat'], loc['lng']);
+        if (dist > loc['radius']) {
+          return _json({
+            'error': 'Siz ofis hududida emassiz',
+            'distance': double.parse(dist.toStringAsFixed(0)),
+          }, status: 400);
+        }
+
+        final now = DateTime.now();
+        final nowHm = '${now.hour.toString().padLeft(2, '0')}:'
+            '${now.minute.toString().padLeft(2, '0')}';
+        // Bugungi yozuv: mavjud bo'lmasa yaratamiz (status 'present').
+        final ex = await db.execute(
+          'SELECT id FROM fh.attendance WHERE employee_id = \$1 AND work_date = CURRENT_DATE',
+          parameters: [eid],
+        );
+        int attId;
+        if (ex.isEmpty) {
+          final ins = await db.execute(
+            "INSERT INTO fh.attendance (employee_id, work_date, status, recorded_by, marked_by) "
+            "VALUES (\$1, CURRENT_DATE, 'present', \$2, 'self') "
+            "RETURNING id, employee_id, work_date, check_in, check_out, "
+            "hours_worked, overtime_hours, status, note, recorded_by, "
+            "check_in_lat, check_in_lng, check_out_lat, check_out_lng, "
+            "marked_by, is_early_leave",
+            parameters: [eid, _uid(request)],
+          );
+          attId = (ins.first[0] as num).toInt();
+        } else {
+          attId = (ex.first[0] as num).toInt();
+        }
+
+        var setSql = '';
+        final setVal = <dynamic>[];
+        if (type == 'in') {
+          final dup = await db.execute(
+            'SELECT check_in, check_out FROM fh.attendance WHERE id = \$1',
+            parameters: [attId],
+          );
+          if (dup.first[0] != null) {
+            return _json({'error': 'Siz allaqachon kelishni belgilagansiz'}, status: 409);
+          }
+          setSql = "check_in = \$1, check_in_lat = \$2, check_in_lng = \$3, marked_by = 'self'";
+          setVal.addAll([nowHm, lat, lng]);
+        } else {
+          final dup = await db.execute(
+            'SELECT check_in, check_out FROM fh.attendance WHERE id = \$1',
+            parameters: [attId],
+          );
+          if (dup.first[1] != null) {
+            return _json({'error': 'Siz allaqachon ketishni belgilagansiz'}, status: 409);
+          }
+          final inStr = _timeToHm(dup.first[0]);
+          final hours = _hours(inStr, nowHm);
+          setSql = "check_out = \$1, check_out_lat = \$2, check_out_lng = \$3, "
+              "marked_by = 'self', hours_worked = \$4, is_early_leave = \$5";
+          setVal.addAll([nowHm, lat, lng, hours, _earlyLeave(nowHm)]);
+        }
+        final res = await db.execute(
+          'UPDATE fh.attendance SET $setSql WHERE id = \$${setVal.length + 1} '
+          'RETURNING id, employee_id, work_date, check_in, check_out, '
+          'hours_worked, overtime_hours, status, note, recorded_by, '
+          'check_in_lat, check_in_lng, check_out_lat, check_out_lng, '
+          'marked_by, is_early_leave',
+          parameters: [...setVal, attId],
+        );
+        return _json({'attendance': AttendanceRecord.fromRow(res.first).toJson()});
+      } catch (e) {
+        print('hr attendance self-checkin xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ────────────────── DAVOMAT: MEN (o'z holatim) ──────────────────
+    // Xodim ekrani uchun: bugungi yozuvi + bog'langan xodim id.
+    get('/hr/attendance/me', (Request request) async {
+      final role = _role(request);
+      if (!Policy.isEmployee(role) && !_canRead(request)) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final db = await DatabaseConnection.getConnection();
+        int? eid = await _ownedEmployeeId(request);
+        if (eid == null) {
+          final qe = int.tryParse(request.url.queryParameters['employee_id'] ?? '');
+          if (qe != null && _canRead(request)) eid = qe;
+        }
+        if (eid == null) {
+          return _json({'error': 'Tizimga bog\'langan faol xodim topilmadi'}, status: 403);
+        }
+        final emp = await db.execute(
+          'SELECT full_name FROM fh.employees WHERE id = \$1',
+          parameters: [eid],
+        );
+        final res = await db.execute(
+          'SELECT id, employee_id, work_date, check_in, check_out, '
+          'hours_worked, overtime_hours, status, note, recorded_by, '
+          'check_in_lat, check_in_lng, check_out_lat, check_out_lng, '
+          'marked_by, is_early_leave '
+          'FROM fh.attendance WHERE employee_id = \$1 AND work_date = CURRENT_DATE',
+          parameters: [eid],
+        );
+        return _json({
+          'employeeId': eid,
+          'employeeName': emp.isEmpty ? null : emp.first[0],
+          'attendance': res.isEmpty ? null : AttendanceRecord.fromRow(res.first).toJson(),
+        });
+      } catch (e) {
+        print('hr attendance me xato: $e');
         return _json({'error': 'Server xatosi'}, status: 500);
       }
     });
@@ -6011,7 +6382,7 @@ get('/hr/reports/monthly', (Request request) async {
         final db = await DatabaseConnection.getConnection();
         final res = await db.execute(
           'SELECT employee_id, full_name, position, department, pay_type, month, '
-          'days_present, days_absent, days_late, total_hours, total_overtime_hours, '
+          'days_present, days_absent, days_late, days_early_leave, total_hours, total_overtime_hours, '
           'base_salary_component, piece_rate_component, '
           'total_bonus, total_penalty, total_advance, net_amount '
           'FROM fh.monthly_payroll_summary WHERE ${where} '
@@ -6028,14 +6399,15 @@ get('/hr/reports/monthly', (Request request) async {
           'daysPresent': r[6],
           'daysAbsent': r[7],
           'daysLate': r[8],
-          'totalHours': r[9]?.toString(),
-          'totalOvertimeHours': r[10]?.toString(),
-          'baseSalaryComponent': r[11]?.toString() ?? '0',
-          'pieceRateComponent': r[12]?.toString() ?? '0',
-          'totalBonus': r[13]?.toString(),
-          'totalPenalty': r[14]?.toString(),
-          'totalAdvance': r[15]?.toString(),
-          'netAmount': r[16]?.toString() ?? '0',
+          'daysEarlyLeave': r[9],
+          'totalHours': r[10]?.toString(),
+          'totalOvertimeHours': r[11]?.toString(),
+          'baseSalaryComponent': r[12]?.toString() ?? '0',
+          'pieceRateComponent': r[13]?.toString() ?? '0',
+          'totalBonus': r[14]?.toString(),
+          'totalPenalty': r[15]?.toString(),
+          'totalAdvance': r[16]?.toString(),
+          'netAmount': r[17]?.toString() ?? '0',
         }).toList();
         return _json({'rows': list});
       } catch (e) {

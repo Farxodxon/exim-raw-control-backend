@@ -72,6 +72,12 @@ class AttendanceRecord {
   final String? note;
   final int? recordedBy;
   final String? employeeName;
+  final double? checkInLat;
+  final double? checkInLng;
+  final double? checkOutLat;
+  final double? checkOutLng;
+  final String markedBy;
+  final bool isEarlyLeave;
 
   AttendanceRecord({
     required this.id,
@@ -85,6 +91,12 @@ class AttendanceRecord {
     this.note,
     this.recordedBy,
     this.employeeName,
+    this.checkInLat,
+    this.checkInLng,
+    this.checkOutLat,
+    this.checkOutLng,
+    this.markedBy = 'manager',
+    this.isEarlyLeave = false,
   });
 
   factory AttendanceRecord.fromRow(List<dynamic> r) => AttendanceRecord(
@@ -98,6 +110,13 @@ class AttendanceRecord {
         status: r[7] as String? ?? 'present',
         note: r[8] as String?,
         recordedBy: r[9] as int?,
+        checkInLat: r.length > 10 ? _doubleOrNull(r[10]) : null,
+        checkInLng: r.length > 11 ? _doubleOrNull(r[11]) : null,
+        checkOutLat: r.length > 12 ? _doubleOrNull(r[12]) : null,
+        checkOutLng: r.length > 13 ? _doubleOrNull(r[13]) : null,
+        markedBy: r.length > 14 ? (r[14] as String? ?? 'manager') : 'manager',
+        isEarlyLeave: r.length > 15 ? (r[15] as bool? ?? false) : false,
+        employeeName: r.length > 16 ? r[16] as String? : null,
       );
 
   Map<String, dynamic> toJson() => {
@@ -112,7 +131,18 @@ class AttendanceRecord {
         'note': note,
         'recordedBy': recordedBy,
         'employeeName': employeeName,
+        'checkInLat': checkInLat,
+        'checkInLng': checkInLng,
+        'checkOutLat': checkOutLat,
+        'checkOutLng': checkOutLng,
+        'markedBy': markedBy,
+        'isEarlyLeave': isEarlyLeave,
       };
+}
+
+double? _doubleOrNull(dynamic v) {
+  if (v == null) return null;
+  return double.parse(v.toString());
 }
 
 class SalaryAdjustment {

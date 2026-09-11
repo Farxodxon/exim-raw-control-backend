@@ -5,6 +5,7 @@ class AppRoles {
   static const warehouseController = 'warehouse_controller';
   static const director = 'director';
   static const hrManager = 'hr_manager';
+  static const employee = 'employee';
 
   static const all = <String>[
     admin,
@@ -13,6 +14,7 @@ class AppRoles {
     warehouseController,
     director,
     hrManager,
+    employee,
   ];
 
   static bool isValid(String role) => all.contains(role);
@@ -48,4 +50,11 @@ class Policy {
 
   static bool canManageHr(String role) =>
       role == AppRoles.admin || role == AppRoles.hrManager;
+
+  // ─── Xodim (employee) — faqat o'z davomatini belgilaydi ────
+  static bool isEmployee(String role) => role == AppRoles.employee;
+
+  // GPS o'z-o'zini belgilash: xodim o'zi yoki HR/admin (sinov uchun).
+  static bool canSelfCheckin(String role) =>
+      role == AppRoles.employee || canManageHr(role);
 }
