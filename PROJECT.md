@@ -1,6 +1,6 @@
 # FactoryHub Backend — Loyiha Dokumentatsiyasi
 
-> Oxirgi yangilanish: 2026-09-11 | Backend: `af7603d` | Frontend: `8303dcc`
+> Oxirgi yangilanish: 2026-09-11 | Backend: `fe3386d` | Frontend: `81489e5`
 
 ---
 
@@ -13,7 +13,7 @@ FactoryHub (exim-raw-control-backend) — O'zbekistondagi ishlab chiqarish korxo
 - **Transferlar** — o'zaro omborlararo yuborish/qabul qilish zanjiri (pending → confirm/reject)
 - **HR** — xodimlar, davomat (08:00–18:00 + 8 soatlik mehnat normasi), oylik haq hisobi, premiya/jarima/avans, qo'shimcha ish soati
 - **Savdo** — buyurtmalar, hamkorlar (Éclair rekvizitlari), shtrix-kodli skanerlash, schyot-faktura/TIR/dalolatnoma
-- **Xavfsizlik** — JWT auth, rolga asoslangan (admin/warehouse_keeper/production_manager/hr_manager/hr_engineer), modul va ombor bo'yicha ruxsatlar
+- **Xavfsizlik** — JWT auth, rolga asoslangan (admin/warehouse_keeper/production_manager/hr_manager/hr_engineer/**employee**), modul va ombor bo'yicha ruxsatlar
 
 ---
 
@@ -40,7 +40,7 @@ exim-raw-control-backend/
 │   ├── database/
 │   │   └── connection.dart      # Neon connection pool
 │   └── factoryhub/
-│       ├── api.dart             # Asosiy API: /fh/* route'lari (~5600 qator)
+│       ├── api.dart             # Asosiy API: /fh/* route'lari (~6400 qator)
 │       ├── hr_models.dart       # AttendanceRecord, WorkRecord modellari
 │       ├── jwt.dart             # JWT generate/verify
 │       ├── policy.dart          # Ruxsat tekshirish (_canRead/_canWrite)
@@ -59,8 +59,9 @@ exim-raw-control-backend/
 │   ├── 010_attendance_overtime.sql
 │   └── 011_fixed_route.sql        # fh.warehouses.fixed_route_to_id
 │   └── 012_dealers.sql            # fh.dealers + indekslar
+│   └── 013_attendance_gps_audit.sql  # GPS self-checkin, audit jurnal, factory_locations, employee rol
 ├── tool/                        # Test skriptlari va migration runner'lar
-│   ├── e2e_flow.dart           # To'liq e2e test (151 test, server 8051)
+│   ├── e2e_flow.dart           # To'liq e2e test (165 test, server 8051)
 │   ├── test_hr_pay.dart        # HR + ish haqi testlari (38 test)
 │   ├── probe_overtime.dart     # Overtime tekshiruvi (9 test)
 │   └── migrate_*.dart          # Migratsiya runner'lar
@@ -116,7 +117,7 @@ dart run tool\migrate_010.dart
 
 ---
 
-## 6. DB sxemasi (fh schema — 28 jadval, 2 view)
+## 6. DB sxemasi (fh schema — 30 jadval, 2 view)
 
 ### Asosiy modullar
 
@@ -148,7 +149,9 @@ dart run tool\migrate_010.dart
 | Jadval | Tavsif |
 |---|---|
 | `fh.employees` | Xodimlar (full_name, position, department, hire_date, pay_type: salary/piece_rate/hybrid, user_id) |
-| `fh.attendance` | Davomat (work_date, check_in/out: TIME, hours_worked: 8h cap, overtime_hours: manual) |
+| `fh.attendance` | Davomat (work_date, check_in/out: TIME, hours_worked: 8h cap, overtime_hours: manual, GPS lat/lng, marked_by: self/manager, is_early_leave) |
+| `fh.attendance_audit_log` | Davomat tahriri jurnali (changed_by, field_name, old_value, new_value, changed_at) |
+| `fh.factory_locations` | Fabrika lokatsiyalari (latitude, longitude, radius_meters, is_active) — GPS radius tekshiruvi uchun |
 | `fh.piece_rates` | Ish turi ↔ narx (work_type, item_id, rate_per_unit, unit) |
 | `fh.work_records` | Ish yozuvlari (work_type, item_id, quantity, rate_applied, computed_amount) |
 | `fh.salary_adjustments` | Premiya/jarima/avans (adjustment_type, amount, status: pending/approved/rejected) |
@@ -157,7 +160,7 @@ dart run tool\migrate_010.dart
 
 | View | Tavsif |
 |---|---|
-| `fh.monthly_payroll_summary` | Oylik hisob (days_present/absent/late, total_hours, total_overtime_hours, base/piece/net_amount) |
+| `fh.monthly_payroll_summary` | Oylik hisob (days_present/absent/late/**days_early_leave**, total_hours, total_overtime_hours, base/piece/net_amount) |
 | `fh.user_access_overview` | Foydalanuvchi ruxsatlari (modules + warehouses birlashtirilgan) |
 
 ### Modullar va ruxsatlar
@@ -181,7 +184,7 @@ dart run tool\migrate_010.dart
 | POST | `/fh/setup` | Dastlabki admin yaratish |
 | GET | `/fh/auth/my-access` | Joriy foydalanuvchi ruxsatlari |
 | GET | `/fh/users` | Barcha foydalanuvchilar |
-| POST | `/fh/users` | Yangi foydalanuvchi |
+| POST | `/fh/users` | Yangi foydalanuvchi (role=employee → avto hr granti; employee_id → xodim bilan bog'lash) |
 | PUT | `/fh/users/<id>` | Tahrirlash |
 | DELETE | `/fh/users/<id>` | O'chirish |
 | POST | `/fh/users/assign` | Ruxsat tayinlash |
@@ -265,10 +268,14 @@ dart run tool\migrate_010.dart
 |---|---|---|
 | GET/POST | `/fh/hr/employees` | Xodimlar CRUD |
 | GET/PUT/DELETE | `/fh/hr/employees/<id>` | Xodim detali |
-| GET | `/fh/hr/attendance` | Davomat (employee_id, month filtrlash) |
+| GET | `/fh/hr/attendance` | Davomat (employee_id, month filtrlash; natija: employeeName + GPS + isEarlyLeave) |
 | POST | `/fh/hr/attendance` | Bitta kun uchun davomat |
 | POST | `/fh/hr/attendance/bulk` | Bir nech kun (till date) |
-| PUT | `/fh/hr/attendance/<id>` | Tahrirlash (+ overtime qo'lda) |
+| PUT | `/fh/hr/attendance/<id>` | Tahrirlash (+ overtime qo'lda; audit INSERT + is_early_leave qayta hisoblash) |
+| GET | `/fh/hr/attendance/<id>/audit` | Davomat tahrirlash tarixi (field, old→new, kim, qachon) |
+| GET | `/fh/hr/attendance/unmarked?date=` | Kun oxirida belgilanmagan xodimlar + selfMarked ro'yxat |
+| POST | `/fh/hr/attendance/self-checkin` | Xodim GPS self-checkin `{type: in\|out, lat, lng}` (Haversine radius; marked_by='self') |
+| GET | `/fh/hr/attendance/me` | Bugungi davomat + xodim (employee roli) |
 | GET/POST | `/fh/hr/piece-rates` | Ish turi ↔ narx |
 | PUT/DELETE | `/fh/hr/piece-rates/<id>` | Tahrirlash/O'chirish |
 | GET/POST | `/fh/hr/work-records` | Ish yozuvlari (avto + qo'lda) |
@@ -276,7 +283,7 @@ dart run tool\migrate_010.dart
 | GET/POST | `/fh/hr/salary-adjustments` | Premiya/jarima/avans |
 | PUT | `/fh/hr/salary-adjustments/<id>/approve` | Tasdiqlash |
 | PUT | `/fh/hr/salary-adjustments/<id>/reject` | Rad etish |
-| GET | `/fh/hr/reports/monthly` | Oylik hisob (total_hours, total_overtime_hours, net_amount) |
+| GET | `/fh/hr/reports/monthly` | Oylik hisob (total_hours, total_overtime_hours, daysEarlyLeave, net_amount) |
 
 ### Boshqa
 | Method | Endpoint | Tavsif |
@@ -331,7 +338,8 @@ dart run tool\migrate_010.dart
 | `reports_screen.dart` | Hisobotlar |
 | `thresholds_screen.dart` | Kritik darajalar |
 | `inspection_screen.dart` | Karantin nazorati |
-| `hr_screen.dart` | HR (xodimlar, davomat, oylik hisob, ish haqi) |
+| `hr_screen.dart` | HR (xodimlar, 3 holatli kuzatuv, davomat, audit tarixi, oylik hisob, ish haqi) |
+| `self_checkin_screen.dart` | Xodim davomati (GPS KELDIM/KETDIM, ofis hududi tekshiruvi) |
 | `dealers_screen.dart` | Dillerlar (segmentli ro'yxat, yaratish/tahrirlash, detail qoldiq) |
 | `users_screen.dart` | Foydalanuvchilar |
 | `user_access_screen.dart` | Ruxsatlar boshqaruvi |
@@ -343,7 +351,7 @@ dart run tool\migrate_010.dart
 
 | Skript | Testlar | Tavsif |
 |---|---|---|
-| `tool/e2e_flow.dart` | 151 | To'liq oqim: mahsulot → ombor → transfer → ishlab chiqarish → karantin → dillerlar |
+| `tool/e2e_flow.dart` | 165 | To'liq oqim: mahsulot → ombor → transfer → ishlab chiqarish → karantin → dillerlar → davomat GPS/audit |
 | `tool/test_hr_pay.dart` | 38 | HR: xodimlar, davomat, ish haqi turlari, oylik hisob, avtomatik work_records |
 | `tool/probe_overtime.dart` | 9 | Overtime: 8 soatlik chegara, qo'shimcha ish soati, monthly total |
 
@@ -362,7 +370,8 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 3. **Ombor zanjiri:** Xom ombor → Production ombor → (Mixing/Packaging) → Karantin ombori → Tayyor mahsulot ombori → Sotuv ombori.
 4. **Transfer tasdiqlash:** `send` da ledger OUT darhol, `confirm` da ledger IN + transfer completed.
 5. **Davomat:** `hours_worked = min(diff_in_hours, 8)` (obed 2 soat, kecha smenada +1440 min). `overtime_hours` faqat qo'lda kiritiladi.
-6. **`.dart_tool/package_config.json`** — repo'da track qilinadi; `dart pub get` dan keyin tekshirib chiqish kerak.
+6. **`is_early_leave`:** `check_out < 18:00` bo'lsa avtomatik true (POST/bulk/PUT va self-checkin out'da hisoblanadi).
+7. **`.dart_tool/package_config.json`** — repo'da track qilinadi; `dart pub get` dan keyin tekshirib chiqish kerak.
 
 ---
 
@@ -370,6 +379,7 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 
 | Sana | Commit | Tavsif |
 |---|---|---|
+| 2026-09-11 | `fe3386d` | **Davomat GPS + audit + erta ketish:** `013_attendance_gps_audit.sql` (GPS lat/lng, marked_by self/manager, is_early_leave, attendance_audit_log, factory_locations, users.role employee, monthly view days_early_leave). `/hr/attendance/self-checkin` (Haversine 200m radius, marked_by=self), `/hr/attendance/me`, `/unmarked`, `/<id>/audit`; PUT audit INSERT'lar bilan; GET/`/me` employee roli faqat o'z yozuvlari. `POST /users` role=employee → avto hr granti + employee_id link. Bootstrap DDL-lardan view recreation'gacha idempotent. Frontend `81489e5`: self_checkin_screen (GPS KELDIM/KETDIM, ofis hududi), 3 holatli kuzatuv (Keldi/Kech qoldi vaqt bilan/Kelmadi), "Erta ketdi" chipi, audit dialog, xodim uchun login yaratish, oylik `daysEarlyLeave`. E2E 165/165. Hisobot: `DAVOMAT_GPS_AUDIT_HISOBOTI.md` |
 | 2026-09-11 | `af7603d` | **Dillerlar (dealers) moduli:** `fh.dealers` (012), `/dealers` CRUD — avto ombor (type='dealer', can_transfer) + dealer→finished qaytarish yo'nalishi, ro'yxat balans N+1 siz, detail to'liq qoldiq, PUT ombor nomi sinxron, DELETE qoldiq<>0 da 409 + cascade. Frontend `8303dcc`: "Dillerlar" ekrani (Ichki bozor/Eksport segment), forma + detail; TransferSheet bozor segmentlari (ichki/eksport) bo'yicha diller tanlash. E2E 151/151 |
 | 2026-09-07 | `86ddeaf` | **Qat'iy transfer sherigi (fixed_route_to_id):** admin ombor sozlamalarida yangi `fixed_route_to_id` ustuni (migratsiya 011). PUT/POST/GET `/warehouses` qat'iy omborni qabul qiladi (faqat transferTo ro'yxati ichidan, canTransfer bo'lsa). `/transfers/send` va legacy `/transfers` qat'iy belgilangan ombor boshqa manzilga yuborilganda 403 qaytaradi; qat'iy manzilga ruxsat etiladi. Packaging `finishedWarehouses` preview endi yarim tayyor omborining finished-routes'laridan (qat'iy bo'lsa faqat o'sha) to'ldiriladi; packaging/start faqat tayinlangan finished omboriga ishlaydi (boshqasiga 403). Frontend `357ca28`: ombor sozlamalarida "Qat'iy (avtomatik) ombor" tanlagichi; transfer oynasida qat'iy ombor bo'lsa manzil tanlanmaydi (avtomatik). E2E yangilandi (125/125) |
 | 2026-09-07 | `96394c2` | **Qadoqlash darhol o'tishi:** /production/packaging/start endi natijani tanlangan tayyor mahsulot omboriga **darhol** o'tkazadi (transfer auto-confirmed, partiya completed, pending=false) — qabul qiluvchi ombor tasdig'ini kutmaydi. E2E yangilandi (104/104) |
@@ -399,4 +409,4 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 
 ## 12. Frontend repo
 
-Flutter frontend: [Farxodxon/factory_hub](https://github.com/Farxodxon/factory_hub) — push ⇒ avtomatik build. Frontend commit `8303dcc` (2026-09-11): Dillerlar ekrani — Ichki bozor/Eksport segmentlar, yaratish/tahrirlash formasi, detail qoldiq; TransferSheet bozor segmentlari bo'yicha diller tanlash. Avvalgi: `357ca28` Qat'iy transfer yo'nalishi — ombor sozlamalarida "Qat'iy (avtomatik) ombor" tanlagichi (`_EditWarehouseSheet`); transfer oynasi (`_TransferSheet`) qat'iy ombor belgilangan bo'lsa manzilni yashirib avtomatik yuboradi.
+Flutter frontend: [Farxodxon/factory_hub](https://github.com/Farxodxon/factory_hub) — push ⇒ avtomatik build. Frontend commit `81489e5` (2026-09-11): davomat GPS self-belgilash ekrani (employee roli uchun yagona ekran, `geolocator`), HR'dagi kuzatuv 3 holatli (Keldi/Kech qoldi vaqt bilan/Kelmadi + "Hammasi keldi"), davomat ro'yxatida GPS ikonka va "Erta ketdi" chipi, tahrirlash tarixi dialogi, xodimga "Login yaratish", oylik hisobotda er-to-ketish ko'rsatkichi. Avvalgi: `8303dcc` Dillerlar ekrani — Ichki bozor/Eksport segmentlar, yaratish/tahrirlash formasi, detail qoldiq; TransferSheet bozor segmentlari bo'yicha diller tanlash. Oldingi: `357ca28` Qat'iy transfer yo'nalishi — ombor sozlamalarida "Qat'iy (avtomatik) ombor" tanlagichi (`_EditWarehouseSheet`); transfer oynasi (`_TransferSheet`) qat'iy ombor belgilangan bo'lsa manzilni yashirib avtomatik yuboradi.
