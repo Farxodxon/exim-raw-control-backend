@@ -192,6 +192,25 @@ void main() async {
       """);
       print('✅ fh.production_batches + stock_ledger source_type extended');
     } catch (_) {}
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS fh.dealers (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(255) NOT NULL,
+          market_type VARCHAR(20) NOT NULL CHECK (market_type IN ('domestic', 'export')),
+          phone VARCHAR(50),
+          address TEXT,
+          contact_person VARCHAR(255),
+          warehouse_id INTEGER NOT NULL REFERENCES fh.warehouses(id) ON DELETE CASCADE,
+          is_active BOOLEAN DEFAULT true,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      ''');
+      await conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS dealers_warehouse_uk ON fh.dealers(warehouse_id)');
+      await conn.execute('CREATE INDEX IF NOT EXISTS dealers_market_type_idx ON fh.dealers(market_type)');
+      print('✅ fh.dealers ensured');
+    } catch (e) { print('⚠️ fh.dealers error: $e'); }
   } catch (e) {
     print('⚠️ Database not connected: \$e');
   }

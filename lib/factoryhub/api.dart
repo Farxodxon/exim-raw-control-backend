@@ -1414,10 +1414,310 @@ final routesResult = await db.execute(
           'code': row[12],
         }).toList();
 
-        return _json({'transactions': transactions, 'total': transactions.length});
+return _json({'transactions': transactions, 'total': transactions.length});
       } catch (e) {
         print('warehouse/:id/transactions xato: $e');
         return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ---------- DEALERS (Sotuv dillerlari) ----------
+    get('/dealers', (Request request) async {
+      final appRole = _role(request);
+      if (!(Policy.canControlWarehouses(appRole) || Policy.canTransactStock(appRole))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final market = request.url.queryParameters['market_type'];
+        final db = await DatabaseConnection.getConnection();
+        final balanceSub = '''
+          SELECT warehouse_id,
+                 COUNT(DISTINCT COALESCE(ref_id::text, ref_barcode)) AS item_count,
+                 SUM(CASE WHEN direction = 'in' THEN qty ELSE -qty END) AS total_qty
+          FROM fh.stock_ledger
+          WHERE direction IS NOT NULL
+          GROUP BY warehouse_id
+        ''';
+        final baseSelect = '''
+          SELECT d.id, d.name, d.market_type, d.phone, d.address, d.contact_person,
+                 d.is_active, d.warehouse_id, w.name AS warehouse_name,
+                 COALESCE(bs.item_count, 0) AS item_count,
+                 COALESCE(bs.total_qty, 0) AS total_qty
+          FROM fh.dealers d
+          JOIN fh.warehouses w ON w.id = d.warehouse_id
+          LEFT JOIN ($balanceSub) bs ON bs.warehouse_id = d.warehouse_id
+        ''';
+        final Result result;
+        if (market != null && (market == 'domestic' || market == 'export')) {
+          result = await db.execute(
+            '$baseSelect WHERE d.market_type = \$1 ORDER BY d.id',
+            parameters: [market],
+          );
+        } else {
+          result = await db.execute('$baseSelect ORDER BY d.id');
+        }
+        final dealers = result.map((r) => {
+          'id': r[0], 'name': r[1], 'marketType': r[2],
+          'phone': r[3], 'address': r[4], 'contactPerson': r[5],
+          'isActive': r[6], 'warehouseId': r[7], 'warehouseName': r[8],
+          'itemCount': r[9], 'totalQty': r[10]?.toString() ?? '0',
+        }).toList();
+        return _json({'dealers': dealers, 'total': dealers.length});
+      } catch (e) {
+        print('dealers GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/dealers', (Request request) async {
+      if (!Policy.canControlWarehouses(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      try {
+        final body = await _body(request);
+        final name = body['name'] as String?;
+        final marketType = body['marketType'] as String?;
+        if (name == null || name.trim().isEmpty ||
+            marketType == null || (marketType != 'domestic' && marketType != 'export')) {
+          return _json({'error': 'name va marketType (domestic|export) majburiy'}, status: 400);
+        }
+        final phone = body['phone'] as String?;
+        final address = body['address'] as String?;
+        final contactPerson = body['contactPerson'] as String?;
+        final isActive = body['isActive'] as bool? ?? true;
+
+        final db = await DatabaseConnection.getConnection();
+        await db.execute('BEGIN');
+        try {
+          // 1. Avval ombor yaratiladi.
+          final wh = await db.execute(
+            "INSERT INTO fh.warehouses (name, type, can_analyze, can_transfer, can_income, can_expense) "
+            "VALUES (\$1, 'dealer', true, true, true, true) RETURNING id",
+            parameters: [name.trim()],
+          );
+          final newWhId = wh.first[0];
+          // 2. So'ng diller shu omborga bog'lanadi.
+          final d = await db.execute(
+            '''
+            INSERT INTO fh.dealers (name, market_type, phone, address, contact_person, warehouse_id, is_active)
+            VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7)
+            RETURNING id, name, market_type, phone, address, contact_person, is_active, warehouse_id
+            ''',
+            parameters: [name.trim(), marketType, phone, address, contactPerson, newWhId, isActive],
+          );
+          // 3. Qaytarish uchun avtomatik yo'nalish: diller ombori → tayyor mahsulot ombori.
+          final fw = await _defaultWarehouseId(db, 'finished');
+          if (fw != null && fw != newWhId) {
+            await db.execute(
+              'INSERT INTO fh.warehouse_transfer_routes (from_warehouse_id, to_warehouse_id) '
+              'VALUES (\$1, \$2) ON CONFLICT DO NOTHING',
+              parameters: [newWhId, fw],
+            );
+          }
+          await db.execute('COMMIT');
+          final r = d.first;
+          return _json({
+            'message': 'Diller yaratildi',
+            'dealer': {
+              'id': r[0], 'name': r[1], 'marketType': r[2],
+              'phone': r[3], 'address': r[4], 'contactPerson': r[5],
+              'isActive': r[6], 'warehouseId': r[7],
+            },
+          }, status: 201);
+        } catch (e) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('dealers POST xato: $e');
+        return _json({'error': "Diller yaratilmadi: $e"}, status: 500);
+      }
+    });
+
+    get('/dealers/<id>', (Request request, String id) async {
+      final appRole = _role(request);
+      if (!(Policy.canControlWarehouses(appRole) || Policy.canTransactStock(appRole))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final dealerId = int.tryParse(id);
+      if (dealerId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final info = await db.execute(
+          '''
+          SELECT d.id, d.name, d.market_type, d.phone, d.address, d.contact_person,
+                 d.is_active, d.warehouse_id, w.name AS warehouse_name
+          FROM fh.dealers d JOIN fh.warehouses w ON w.id = d.warehouse_id
+          WHERE d.id = \$1
+          ''',
+          parameters: [dealerId],
+        );
+        if (info.isEmpty) return _json({'error': 'Topilmadi'}, status: 404);
+        final r = info.first;
+        final whId = (r[7] as num).toInt();
+
+        final routesResult = await db.execute(
+          'SELECT r.to_warehouse_id, w.name '
+          'FROM fh.warehouse_transfer_routes r '
+          'JOIN fh.warehouses w ON w.id = r.to_warehouse_id '
+          'WHERE r.from_warehouse_id = \$1 ORDER BY r.to_warehouse_id',
+          parameters: [whId],
+        );
+
+        final stockResult = await db.execute(
+          '''
+          SELECT l.item_type,
+                 COALESCE(
+                   CASE
+                     WHEN l.item_type = 'raw_material' THEN rm.code
+                     WHEN l.item_type = 'item' AND l.ref_id IS NOT NULL THEN l.ref_id::text
+                     ELSE l.ref_barcode
+                   END
+                 ) AS ref_key,
+                 MAX(l.name_snapshot) AS name,
+                 MAX(l.unit) AS unit,
+                 SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) AS balance,
+                 MAX(l.ref_id) AS ref_id,
+                 MAX(l.ref_barcode) AS ref_barcode
+          FROM fh.stock_ledger l
+          LEFT JOIN public.raw_materials rm ON rm.id = l.ref_id
+          WHERE l.warehouse_id = \$1
+          GROUP BY l.item_type, COALESCE(
+                   CASE
+                     WHEN l.item_type = 'raw_material' THEN rm.code
+                     WHEN l.item_type = 'item' AND l.ref_id IS NOT NULL THEN l.ref_id::text
+                     ELSE l.ref_barcode
+                   END
+                 )
+          HAVING SUM(CASE l.direction WHEN 'in' THEN l.qty ELSE -l.qty END) <> 0
+          ORDER BY l.item_type, name
+          ''',
+          parameters: [whId],
+        );
+
+        return _json({
+          'dealer': {
+            'id': r[0], 'name': r[1], 'marketType': r[2],
+            'phone': r[3], 'address': r[4], 'contactPerson': r[5],
+            'isActive': r[6], 'warehouseId': whId, 'warehouseName': r[8],
+            'transferTo': routesResult.map((x) => x[0]).toList(),
+            'transferToWarehouses': routesResult.map((x) => {'id': x[0], 'name': x[1]}).toList(),
+          },
+          'stock': stockResult.map((row) => {
+            'itemType': row[0], 'refKey': row[1], 'name': row[2],
+            'unit': row[3], 'balance': row[4]?.toString(),
+            'refId': row[5], 'refBarcode': row[6],
+          }).toList(),
+        });
+      } catch (e) {
+        print('dealers/:id GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    put('/dealers/<id>', (Request request, String id) async {
+      if (!Policy.canControlWarehouses(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final dealerId = int.tryParse(id);
+      if (dealerId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+      try {
+        final body = await _body(request);
+        final db = await DatabaseConnection.getConnection();
+        final row = await db.execute(
+          'SELECT warehouse_id FROM fh.dealers WHERE id = \$1',
+          parameters: [dealerId],
+        );
+        if (row.isEmpty) return _json({'error': 'Topilmadi'}, status: 404);
+        final whId = (row.first[0] as num).toInt();
+        final name = body['name'] as String?;
+        final marketType = body['marketType'] as String?;
+        if (name == null || name.trim().isEmpty ||
+            marketType == null || (marketType != 'domestic' && marketType != 'export')) {
+          return _json({'error': 'name va marketType (domestic|export) majburiy'}, status: 400);
+        }
+        final phone = body['phone'] as String?;
+        final address = body['address'] as String?;
+        final contactPerson = body['contactPerson'] as String?;
+        final isActive = body['isActive'] as bool? ?? true;
+        await db.execute('BEGIN');
+        await db.execute(
+          'UPDATE fh.warehouses SET name = \$1 WHERE id = \$2',
+          parameters: [name.trim(), whId],
+        );
+        await db.execute(
+          'UPDATE fh.dealers SET name = \$1, market_type = \$2, phone = \$3, address = \$4, '
+          'contact_person = \$5, is_active = \$6 WHERE id = \$7',
+          parameters: [name.trim(), marketType, phone, address, contactPerson, isActive, dealerId],
+        );
+        await db.execute('COMMIT');
+        return _json({'message': 'Diller yangilandi'});
+      } catch (e) {
+        print('dealers/:id PUT xato: $e');
+        return _json({'error': "Diller yangilanmadi: $e"}, status: 500);
+      }
+    });
+
+    delete('/dealers/<id>', (Request request, String id) async {
+      if (!Policy.canControlWarehouses(_role(request))) {
+        return _json({'error': 'Ruxsat yoq'}, status: 403);
+      }
+      final dealerId = int.tryParse(id);
+      if (dealerId == null) return _json({'error': "Noto'g'ri ID"}, status: 400);
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final row = await db.execute(
+          'SELECT warehouse_id, name FROM fh.dealers WHERE id = \$1',
+          parameters: [dealerId],
+        );
+        if (row.isEmpty) return _json({'error': 'Topilmadi'}, status: 404);
+        final whId = (row.first[0] as num).toInt();
+        // Omborda qoldiq bo'lsa o'chirishga ruxsat berilmaydi.
+        final balanceRows = await db.execute(
+          '''
+          SELECT 1 FROM fh.stock_ledger WHERE warehouse_id = \$1 AND direction IS NOT NULL
+          GROUP BY warehouse_id
+          HAVING SUM(CASE WHEN direction = 'in' THEN qty ELSE -qty END) <> 0
+          ''',
+          parameters: [whId],
+        );
+        if (balanceRows.isNotEmpty) {
+          return _json({'error': "Diller ombori bo'sh emas"}, status: 409);
+        }
+        await db.execute('BEGIN');
+        try {
+          await db.execute('DELETE FROM fh.dealers WHERE id = \$1', parameters: [dealerId]);
+          await db.execute(
+            'DELETE FROM fh.warehouse_transfer_routes WHERE from_warehouse_id = \$1 OR to_warehouse_id = \$1',
+            parameters: [whId],
+          );
+          await db.execute('DELETE FROM fh.stock_writes WHERE warehouse_id = \$1', parameters: [whId]);
+          await db.execute(
+            'DELETE FROM fh.transfer_items WHERE transfer_id IN '
+            '(SELECT id FROM fh.transfers WHERE from_warehouse_id = \$1 OR to_warehouse_id = \$1)',
+            parameters: [whId],
+          );
+          await db.execute(
+            'DELETE FROM fh.transfers WHERE from_warehouse_id = \$1 OR to_warehouse_id = \$1',
+            parameters: [whId],
+          );
+          await db.execute(
+            'DELETE FROM fh.production_batches WHERE source_warehouse_id = \$1 OR dest_warehouse_id = \$1',
+            parameters: [whId],
+          );
+          await db.execute('DELETE FROM fh.stock_ledger WHERE warehouse_id = \$1', parameters: [whId]);
+          await db.execute('DELETE FROM fh.product_warehouses WHERE warehouse_id = \$1', parameters: [whId]);
+          await db.execute('DELETE FROM fh.user_warehouses WHERE warehouse_id = \$1', parameters: [whId]);
+          await db.execute('DELETE FROM fh.warehouses WHERE id = \$1', parameters: [whId]);
+          await db.execute('COMMIT');
+          return _json({'message': 'Diller o\'chirildi'});
+        } catch (e) {
+          await db.execute('ROLLBACK');
+          rethrow;
+        }
+      } catch (e) {
+        print('dealers/:id DELETE xato: $e');
+        return _json({'error': "Diller o'chirilmadi: $e"}, status: 500);
       }
     });
 

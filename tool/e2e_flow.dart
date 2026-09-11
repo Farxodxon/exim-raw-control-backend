@@ -697,6 +697,101 @@ Future<void> main() async {
   (s, j) = await call('GET', '/warehouses/$whSemi', tokenStr: adminTok);
   check('fixed: invalid fixed cleared in detail', (j['warehouse'] as Map)['fixedTransferTo'] == null, '$j');
 
+  // ── 11. DEALERS (Sotuv dillerlari moduli) ─────────────────────────────
+  // Diller yaratilganda ombor avtomatik yaratiladi + qaytarish uchun
+  // dealer->finished yo'nalishi qo'shiladi (agar finished mavjud bo'lsa).
+  (s, j) = await call('GET', '/dealers', tokenStr: opsTok);
+  check('dealers: ops list allowed 200', s == 200, 'status=$s $j');
+
+  (s, j) = await call('POST', '/dealers', body: {}, tokenStr: adminTok);
+  check('dealers: empty body 400', s == 400, 'status=$s $j');
+  (s, j) = await call('POST', '/dealers',
+      body: {'name': 'E2E Diller B', 'marketType': 'bad'}, tokenStr: adminTok);
+  check('dealers: bad marketType 400', s == 400, 'status=$s $j');
+
+  (s, j) = await call('POST', '/dealers', body: {
+    'name': 'E2E Diller B', 'marketType': 'domestic',
+    'phone': '+998901234567', 'contactPerson': 'Ali',
+  }, tokenStr: adminTok);
+  check('dealers: create 201', s == 201, 'status=$s $j');
+  final d1 = j['dealer'] as Map;
+  final d1Id = (d1['id'] as num?)?.toInt();
+  final d1Wh = (d1['warehouseId'] as num?)?.toInt();
+  check('dealers: created id + warehouseId', d1Id != null && d1Wh != null, '$j');
+
+  // Avtomatik yaratilgan ombor tekshiruvi.
+  (s, j) = await call('GET', '/warehouses/$d1Wh', tokenStr: adminTok);
+  check('dealers: auto warehouse detail 200', s == 200, 'status=$s $j');
+  final dWh = j['warehouse'] as Map;
+  check('dealers: wh type dealer', dWh['type'] == 'dealer', '$j');
+  check('dealers: wh name = dealer name', dWh['name'] == 'E2E Diller B', '$j');
+  check('dealers: wh canTransfer true', dWh['canTransfer'] == true, '$j');
+  final dRoutes = (dWh['transferToWarehouses'] as List);
+  check('dealers: auto route -> finished',
+      dRoutes.any((e) => (e as Map)['id'] == whFin), '$j');
+
+  // Ro'yxatda segment filtr + bo'sh qoldiq.
+  (s, j) = await call('GET', '/dealers?market_type=domestic', tokenStr: adminTok);
+  var dlrDom = (j['dealers'] as List).where((e) => (e as Map)['id'] == d1Id).toList();
+  check('dealers: domestic list contains', dlrDom.isNotEmpty, '$j');
+  check('dealers: empty balance itemCount',
+      dlrDom.isNotEmpty && (dlrDom.first as Map)['itemCount'] == 0, '$j');
+  (s, j) = await call('GET', '/dealers?market_type=export', tokenStr: adminTok);
+  check('dealers: export filter excludes', s == 200
+      && (j['dealers'] as List).where((e) => (e as Map)['id'] == d1Id).isEmpty, '$j');
+
+  // Qoldiq paydo bo'lgach balans aks etadi (N+1 emas — aggregatsiya bilan).
+  await c.execute(
+    "INSERT INTO fh.stock_ledger (warehouse_id, item_type, ref_id, name_snapshot, unit, "
+    "direction, qty, source_type, performed_by, note) "
+    "VALUES (\$1, 'finished', \$2, 'E2E Tayyor', 'dona', 'in', 10, 'manual', \$3, 'E2E dealer seed')",
+    parameters: [d1Wh, iFin, adminId]);
+  (s, j) = await call('GET', '/dealers?market_type=domestic', tokenStr: adminTok);
+  dlrDom = (j['dealers'] as List).where((e) => (e as Map)['id'] == d1Id).toList();
+  check('dealers: balance itemCount 1',
+      dlrDom.isNotEmpty && (dlrDom.first as Map)['itemCount'] == 1, '$j');
+  check('dealers: balance totalQty 10', dlrDom.isNotEmpty
+      && double.parse((dlrDom.first as Map)['totalQty'].toString()) == 10.0, '$j');
+
+  // Detail + to'liq ombor qoldig'i.
+  (s, j) = await call('GET', '/dealers/$d1Id', tokenStr: opsTok);
+  check('dealers: detail 200', s == 200, 'status=$s $j');
+  check('dealers: detail stock 1', (j['stock'] as List).length == 1, '$j');
+  check('dealers: detail balance 10',
+      double.parse((j['stock'] as List).first['balance'].toString()) == 10.0, '$j');
+
+  // Omborda qoldiq bor — o'chirib bo'lmaydi.
+  (s, j) = await call('DELETE', '/dealers/$d1Id', tokenStr: adminTok);
+  check('dealers: delete non-empty 409', s == 409
+      && (j['error'] as String? ?? '').contains("bo'sh emas"), 'status=$s $j');
+
+  // Qoldiq tozalanib o'chiriladi (ombor ham o'chadi).
+  await c.execute('DELETE FROM fh.stock_ledger WHERE warehouse_id = \$1', parameters: [d1Wh]);
+  (s, j) = await call('DELETE', '/dealers/$d1Id', tokenStr: adminTok);
+  check('dealers: delete empty 200', s == 200, 'status=$s $j');
+  (s, _) = await call('GET', '/warehouses/$d1Wh', tokenStr: adminTok);
+  check('dealers: warehouse removed with dealer', s == 404, 'status=$s');
+
+  // PUT — ombor nomi diller nomi bilan sinxron yangilanadi.
+  (s, j) = await call('POST', '/dealers',
+      body: {'name': 'E2E Exporter', 'marketType': 'export'}, tokenStr: adminTok);
+  check('dealers: export create 201', s == 201, 'status=$s $j');
+  final d2 = j['dealer'] as Map;
+  final d2Id = (d2['id'] as num?)?.toInt();
+  final d2Wh = (d2['warehouseId'] as num?)?.toInt();
+  (s, j) = await call('PUT', '/dealers/$d2Id', body: {
+    'name': 'E2E Exporter 2', 'marketType': 'export',
+    'phone': null, 'address': null, 'contactPerson': null, 'isActive': true,
+  }, tokenStr: adminTok);
+  check('dealers: put 200', s == 200, 'status=$s $j');
+  (s, j) = await call('GET', '/dealers/$d2Id', tokenStr: adminTok);
+  check('dealers: put name reflect', s == 200 && (j['dealer'] as Map)['name'] == 'E2E Exporter 2', '$j');
+  (s, j) = await call('GET', '/warehouses/$d2Wh', tokenStr: adminTok);
+  check('dealers: warehouse name synced',
+      s == 200 && (j['warehouse'] as Map)['name'] == 'E2E Exporter 2', '$j');
+  (s, _) = await call('DELETE', '/dealers/$d2Id', tokenStr: adminTok);
+  check('dealers: export delete empty', s == 200, 'status=$s');
+
   // ── FINAL ──────────────────────────────────────────────────────────────
   await cleanup();
 
