@@ -1,6 +1,6 @@
 # FactoryHub Backend — Loyiha Dokumentatsiyasi
 
-> Oxirgi yangilanish: 2026-09-07 | Backend: `86ddeaf` | Frontend: `357ca28`
+> Oxirgi yangilanish: 2026-09-11 | Backend: `af7603d` | Frontend: `8303dcc`
 
 ---
 
@@ -58,8 +58,9 @@ exim-raw-control-backend/
 │   ├── 009_hr_pay_types.sql
 │   ├── 010_attendance_overtime.sql
 │   └── 011_fixed_route.sql        # fh.warehouses.fixed_route_to_id
+│   └── 012_dealers.sql            # fh.dealers + indekslar
 ├── tool/                        # Test skriptlari va migration runner'lar
-│   ├── e2e_flow.dart           # To'liq e2e test (105 test, server 8051)
+│   ├── e2e_flow.dart           # To'liq e2e test (151 test, server 8051)
 │   ├── test_hr_pay.dart        # HR + ish haqi testlari (38 test)
 │   ├── probe_overtime.dart     # Overtime tekshiruvi (9 test)
 │   └── migrate_*.dart          # Migratsiya runner'lar
@@ -128,6 +129,7 @@ dart run tool\migrate_010.dart
 | `fh.boms` | BOM retseptlar (name, stage, output_item_id, output_qty_per_batch) |
 | `fh.bom_items` | BOM tarkibi (bom_id, item_type, ref_id, ref_barcode, qty) |
 | `fh.production_batches` | Ishlab chiqarish partiyalari (plan_id, bom_id, stage, source/dest_warehouse_id) |
+| `fh.dealers` | Sotuv dillerlari (name, market_type, phone, address, contact_person, warehouse_id 1:1) |
 
 ### Ombor zanjiri
 
@@ -225,6 +227,15 @@ dart run tool\migrate_010.dart
 | POST | `/fh/transfers/<id>/confirm` | Tasdiqlash (ledger IN) |
 | POST | `/fh/transfers/<id>/reject` | Rad etish (reverse) |
 
+### Dillerlar
+| Method | Endpoint | Tavsif |
+|---|---|---|
+| GET | `/fh/dealers?market_type=` | Ro'yxat + balans (N+1 yo'q — LEFT JOIN agregatsiya) |
+| POST | `/fh/dealers` | Yaratish (avto ombor type='dealer' + dealer→finished route) |
+| GET | `/fh/dealers/<id>` | Detal (kontakt + to'liq qoldiq) |
+| PUT | `/fh/dealers/<id>` | Tahrirlash (ombor nomini sinxron) |
+| DELETE | `/fh/dealers/<id>` | O'chirish (qoldiq<>0 → 409; aks holda ombor + routes cascade)
+
 ### Ishlab chiqarish
 | Method | Endpoint | Tavsif |
 |---|---|---|
@@ -321,6 +332,7 @@ dart run tool\migrate_010.dart
 | `thresholds_screen.dart` | Kritik darajalar |
 | `inspection_screen.dart` | Karantin nazorati |
 | `hr_screen.dart` | HR (xodimlar, davomat, oylik hisob, ish haqi) |
+| `dealers_screen.dart` | Dillerlar (segmentli ro'yxat, yaratish/tahrirlash, detail qoldiq) |
 | `users_screen.dart` | Foydalanuvchilar |
 | `user_access_screen.dart` | Ruxsatlar boshqaruvi |
 | `alerts_screen.dart` | Ogohlantirishlar |
@@ -331,7 +343,7 @@ dart run tool\migrate_010.dart
 
 | Skript | Testlar | Tavsif |
 |---|---|---|
-| `tool/e2e_flow.dart` | 105 | To'liq oqim: mahsulot → ombor → transfer → ishlab chiqarish → karantin |
+| `tool/e2e_flow.dart` | 151 | To'liq oqim: mahsulot → ombor → transfer → ishlab chiqarish → karantin → dillerlar |
 | `tool/test_hr_pay.dart` | 38 | HR: xodimlar, davomat, ish haqi turlari, oylik hisob, avtomatik work_records |
 | `tool/probe_overtime.dart` | 9 | Overtime: 8 soatlik chegara, qo'shimcha ish soati, monthly total |
 
@@ -358,6 +370,7 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 
 | Sana | Commit | Tavsif |
 |---|---|---|
+| 2026-09-11 | `af7603d` | **Dillerlar (dealers) moduli:** `fh.dealers` (012), `/dealers` CRUD — avto ombor (type='dealer', can_transfer) + dealer→finished qaytarish yo'nalishi, ro'yxat balans N+1 siz, detail to'liq qoldiq, PUT ombor nomi sinxron, DELETE qoldiq<>0 da 409 + cascade. Frontend `8303dcc`: "Dillerlar" ekrani (Ichki bozor/Eksport segment), forma + detail; TransferSheet bozor segmentlari (ichki/eksport) bo'yicha diller tanlash. E2E 151/151 |
 | 2026-09-07 | `86ddeaf` | **Qat'iy transfer sherigi (fixed_route_to_id):** admin ombor sozlamalarida yangi `fixed_route_to_id` ustuni (migratsiya 011). PUT/POST/GET `/warehouses` qat'iy omborni qabul qiladi (faqat transferTo ro'yxati ichidan, canTransfer bo'lsa). `/transfers/send` va legacy `/transfers` qat'iy belgilangan ombor boshqa manzilga yuborilganda 403 qaytaradi; qat'iy manzilga ruxsat etiladi. Packaging `finishedWarehouses` preview endi yarim tayyor omborining finished-routes'laridan (qat'iy bo'lsa faqat o'sha) to'ldiriladi; packaging/start faqat tayinlangan finished omboriga ishlaydi (boshqasiga 403). Frontend `357ca28`: ombor sozlamalarida "Qat'iy (avtomatik) ombor" tanlagichi; transfer oynasida qat'iy ombor bo'lsa manzil tanlanmaydi (avtomatik). E2E yangilandi (125/125) |
 | 2026-09-07 | `96394c2` | **Qadoqlash darhol o'tishi:** /production/packaging/start endi natijani tanlangan tayyor mahsulot omboriga **darhol** o'tkazadi (transfer auto-confirmed, partiya completed, pending=false) — qabul qiluvchi ombor tasdig'ini kutmaydi. E2E yangilandi (104/104) |
 | 2026-09-07 | `10c1f7a` | **Dashboard statistika:** totalEmployees + dealerWarehouses, activeWarehouses/batchesInProgress olib tashlandi; **Tekshiruv:** approve yarim tayyor → yarim tayyor ombori, xom ashyo → xom ombori (item_type bo'yicha, destType javobda) |
@@ -386,4 +399,4 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 
 ## 12. Frontend repo
 
-Flutter frontend: [Farxodxon/factory_hub](https://github.com/Farxodxon/factory_hub) — push ⇒ avtomatik build. Frontend commit `357ca28` (2026-09-07): Qat'iy transfer yo'nalishi — ombor sozlamalarida "Qat'iy (avtomatik) ombor" tanlagichi (`_EditWarehouseSheet`); transfer oynasi (`_TransferSheet`) qat'iy ombor belgilangan bo'lsa manzilni yashirib avtomatik yuboradi. Avvalgi: `e710fde` Yangi mahsulot (to'liq tarkib) 3 bosqichli wizard — finished item + aralashtirish retsepti + qadoqlash retsepti birgalikda.
+Flutter frontend: [Farxodxon/factory_hub](https://github.com/Farxodxon/factory_hub) — push ⇒ avtomatik build. Frontend commit `8303dcc` (2026-09-11): Dillerlar ekrani — Ichki bozor/Eksport segmentlar, yaratish/tahrirlash formasi, detail qoldiq; TransferSheet bozor segmentlari bo'yicha diller tanlash. Avvalgi: `357ca28` Qat'iy transfer yo'nalishi — ombor sozlamalarida "Qat'iy (avtomatik) ombor" tanlagichi (`_EditWarehouseSheet`); transfer oynasi (`_TransferSheet`) qat'iy ombor belgilangan bo'lsa manzilni yashirib avtomatik yuboradi.
