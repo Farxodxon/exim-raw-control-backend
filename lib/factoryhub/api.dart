@@ -5480,12 +5480,18 @@ double? _hours(String? inStr, String? outStr) {
       final a = DateTime.tryParse('2000-01-01 $inStr');
       final b = DateTime.tryParse('2000-01-01 $outStr');
       if (a == null || b == null) return null;
-      var minutes = b.difference(a).inMinutes;
-      if (minutes < 0) minutes += 1440; // tun smenasi (masalan 22:00 -> 06:00)
-      final diff = minutes / 60.0;
-      // Obed (tushlik) hisobiga asosiy ish vaqti 8 soat bilan chegaralanadi:
-      // 08:00-18:00 = 10 soat bo'lsa ham ish = 8 soat.
-      final capped = diff > 8 ? 8.0 : diff;
+      var from = a.hour * 60 + a.minute;
+      var to = b.hour * 60 + b.minute;
+      if (to < from) to += 1440; // tun smenasi (masalan 22:00 -> 06:00)
+      // Tushlik (12:00-14:00) ish vaqtiga kirmaydi. To'liq ish kuni:
+      // 08:00-12:00 (4 soat) + 14:00-18:00 (4 soat) = 8 soat.
+      const lunchStart = 12 * 60;
+      const lunchEnd = 14 * 60;
+      final overlap = math.max(0, math.min(to, lunchEnd) - math.max(from, lunchStart));
+      var work = (to - from) - overlap;
+      if (work < 0) work = 0;
+      final hours = work / 60.0;
+      final capped = hours > 8 ? 8.0 : hours;
       return double.parse(capped.toStringAsFixed(2));
     }
 

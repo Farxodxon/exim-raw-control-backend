@@ -878,6 +878,40 @@ Future<void> main() async {
   check('employee: own attendance 200 + count=1', s == 200
       && (j['attendance'] as List).length == 1, 'status=$s $j');
 
+  // ── Tushlik (12:00-14:00) ish vaqtiga kirmaydi ─────────────────────
+  String lDate(int d) =>
+      DateTime.now().add(Duration(days: d)).toIso8601String().substring(0, 10);
+
+  (s, j) = await call('POST', '/hr/attendance', body: {
+    'employeeId': empId, 'workDate': lDate(1), 'checkIn': '08:00', 'checkOut': '12:00',
+  }, tokenStr: adminTok);
+  check('lunch-rule: 08:00-12:00 -> hours 4.0',
+      (j['attendance'] as Map?)?['hoursWorked']?.toString() == '4.0', '$j');
+
+  (s, j) = await call('POST', '/hr/attendance', body: {
+    'employeeId': empId, 'workDate': lDate(2), 'checkIn': '14:00', 'checkOut': '18:00',
+  }, tokenStr: adminTok);
+  check('lunch-rule: 14:00-18:00 -> hours 4.0',
+      (j['attendance'] as Map?)?['hoursWorked']?.toString() == '4.0', '$j');
+
+  (s, j) = await call('POST', '/hr/attendance', body: {
+    'employeeId': empId, 'workDate': lDate(3), 'checkIn': '08:00', 'checkOut': '16:00',
+  }, tokenStr: adminTok);
+  check('lunch-rule: 08:00-16:00 -> hours 6.0 (12-14 chiqariladi)',
+      (j['attendance'] as Map?)?['hoursWorked']?.toString() == '6.0', '$j');
+
+  (s, j) = await call('POST', '/hr/attendance', body: {
+    'employeeId': empId, 'workDate': lDate(4), 'checkIn': '12:00', 'checkOut': '14:00',
+  }, tokenStr: adminTok);
+  check('lunch-rule: 12:00-14:00 -> hours 0.0',
+      (j['attendance'] as Map?)?['hoursWorked']?.toString() == '0.0', '$j');
+
+  (s, j) = await call('POST', '/hr/attendance', body: {
+    'employeeId': empId, 'workDate': lDate(5), 'checkIn': '08:00', 'checkOut': '18:00',
+  }, tokenStr: adminTok);
+  check('lunch-rule: 08:00-18:00 -> hours 8.0',
+      (j['attendance'] as Map?)?['hoursWorked']?.toString() == '8.0', '$j');
+
   // Audit log: avval PUT bilan status o'zgartiramiz.
   final attRow = await c.execute(
     "SELECT id FROM fh.attendance WHERE employee_id = \$1 AND work_date = CURRENT_DATE LIMIT 1",
