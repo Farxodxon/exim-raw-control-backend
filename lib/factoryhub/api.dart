@@ -1,4 +1,4 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:shelf/shelf.dart';
@@ -23,7 +23,7 @@ Response _json(Object? body, {int status = 200}) => Response(
       headers: {'Content-Type': 'application/json'},
     );
 
-// Ikki koordinata orasidagi masofa (metr) — Haversine formulasi.
+// Ikki koordinata orasidagi masofa (metr) � Haversine formulasi.
 double _haversineMeters(double lat1, double lon1, double lat2, double lon2) {
   const r = 6371000.0;
   double rad(double d) => d * math.pi / 180.0;
@@ -76,7 +76,7 @@ String? _moduleKeyForPath(String path) {
   if (path.startsWith('production/packaging')) return 'packaging';
   if (path.startsWith('production/')) return 'production';
   // Qabul tasdiqlash (transfers/pending, confirm, reject) chegirmasi MODUL
-  // emas, omborga kirish (user_warehouses) orqali beriladi — shuning uchun
+  // emas, omborga kirish (user_warehouses) orqali beriladi � shuning uchun
   // bu yerda sezilarli emas: nazorat berilgan har kimga ko'rinadi.
   if (path.startsWith('inspections/')) return 'inspection';
   if (path.startsWith('hr/')) return 'hr';
@@ -276,7 +276,7 @@ final payload = FhJwt.getUserFromToken(authHeader);
     final uid = payload['user_id'] as int?;
 
     // Modul-va-omborga asoslangan ruxsatlar.
-    // Admin/director — to'liq kirish; qolganlar faqat biriktirilgan
+    // Admin/director � to'liq kirish; qolganlar faqat biriktirilgan
     // omborlar (user_warehouses) va modullar (user_modules) bo'yicha.
     if (role != AppRoles.admin &&
         role != AppRoles.director &&
@@ -285,13 +285,13 @@ final payload = FhJwt.getUserFromToken(authHeader);
       final whGranted = await _grantedWarehouseIds(uid);
       final modGranted = await _grantedModuleKeys(uid);
 
-      // warehouse_id query parametri — biriktirilgan omborda bo'lishi shart.
+      // warehouse_id query parametri � biriktirilgan omborda bo'lishi shart.
       final qwh = int.tryParse(request.url.queryParameters['warehouse_id'] ?? '');
       if (qwh != null && !whGranted.contains(qwh)) {
         return _json({'error': 'Bu omborga kirish ruxsati yo\'q'}, status: 403);
       }
 
-      // /warehouses/<id>... — path'dagi ombor ID sini tekshirish.
+      // /warehouses/<id>... � path'dagi ombor ID sini tekshirish.
       final whPath = RegExp(r'^warehouses/(\d+)').firstMatch(path);
       if (whPath != null) {
         final wid = int.tryParse(whPath.group(1)!);
@@ -300,13 +300,13 @@ final payload = FhJwt.getUserFromToken(authHeader);
         }
       }
 
-      // Modul path'lar — grant bo'lishi shart.
+      // Modul path'lar � grant bo'lishi shart.
       final mk = _moduleKeyForPath(path);
       if (mk != null && !modGranted.contains(mk)) {
         return _json({'error': 'Bu bo\'limga kirish ruxsati yo\'q'}, status: 403);
       }
 
-      // Hisobotlar ombor bilan bog'liq — ombori bo'lmagan foydalanuvchiga yopiq.
+      // Hisobotlar ombor bilan bog'liq � ombori bo'lmagan foydalanuvchiga yopiq.
       if (path.startsWith('reports/') && whGranted.isEmpty) {
         return _json({'error': 'Ruxsat yo\'q'}, status: 403);
       }
@@ -751,7 +751,7 @@ final user = await FhUserStorage.createUser(
             parameters: [user.id, _uid(request)],
           );
         }
-        // employee_id berilgan bo'lsa — xodimni yaratilgan loginga bog'laymiz.
+        // employee_id berilgan bo'lsa � xodimni yaratilgan loginga bog'laymiz.
         final employeeId = body['employee_id'] as int?;
         if (employeeId != null) {
           await db.execute(
@@ -1248,8 +1248,12 @@ return _json({
           '(SELECT id FROM fh.transfers WHERE from_warehouse_id = \$1 OR to_warehouse_id = \$1)',
           parameters: [warehouseId],
         );
-        await db.execute(
+await db.execute(
           'DELETE FROM fh.transfers WHERE from_warehouse_id = \$1 OR to_warehouse_id = \$1',
+          parameters: [warehouseId],
+        );
+        await db.execute(
+          'DELETE FROM fh.stock_transfers WHERE source_warehouse_id = \$1 OR dest_warehouse_id = \$1',
           parameters: [warehouseId],
         );
         await db.execute(
@@ -1330,6 +1334,34 @@ final routesResult = await db.execute(
           parameters: [warehouseId],
         );
 
+        // Diller manzillari: finished/dealer omborlar uchun barcha faol
+        // diller omborlari AVTOMATIK transfer manzili hisoblanadi � qo'lda
+        // yo'nalish sozlash shart emas. Qo'lda qo'shilgan yo'nalishlar va
+        // qat'iy (fixed) manzil saqlanib qoladi.
+        final destIds = <dynamic>[];
+        final destWarehouses = <Map<String, dynamic>>[];
+        final seenDestIds = <int>{};
+        for (final r in routesResult) {
+          final rid = (r[0] as num).toInt();
+          if (!seenDestIds.add(rid)) continue;
+          destIds.add(rid);
+          destWarehouses.add({'id': rid, 'name': r[1]});
+        }
+        final srcType = info[1] as String?;
+        if (srcType == 'finished' || srcType == 'dealer') {
+          final dealerWhs = await db.execute(
+            'SELECT w.id, w.name '
+            'FROM fh.dealers d JOIN fh.warehouses w ON w.id = d.warehouse_id '
+            'WHERE d.is_active AND w.is_active ORDER BY w.id',
+          );
+          for (final d in dealerWhs) {
+            final did = (d[0] as num).toInt();
+            if (did == warehouseId || !seenDestIds.add(did)) continue;
+            destIds.add(did);
+            destWarehouses.add({'id': did, 'name': d[1]});
+          }
+        }
+
         final stockResult = await db.execute(
           '''
           SELECT l.item_type,
@@ -1372,10 +1404,8 @@ final routesResult = await db.execute(
             'canTransfer': info[5] ?? false,
             'canIncome': info[6] ?? true,
 'canExpense': info[7] ?? true,
-            'transferTo': routesResult.map((r) => r[0]).toList(),
-            'transferToWarehouses': routesResult.map((r) => {
-              'id': r[0], 'name': r[1],
-            }).toList(),
+            'transferTo': destIds,
+            'transferToWarehouses': destWarehouses,
             'fixedTransferTo': fixedToId,
             'fixedTransferToWarehouse': fixedToName,
           },
@@ -1536,7 +1566,7 @@ return _json({'transactions': transactions, 'total': transactions.length});
             ''',
             parameters: [name.trim(), marketType, phone, address, contactPerson, newWhId, isActive],
           );
-          // 3. Qaytarish uchun avtomatik yo'nalish: diller ombori → tayyor mahsulot ombori.
+          // 3. Qaytarish uchun avtomatik yo'nalish: diller ombori ? tayyor mahsulot ombori.
           final fw = await _defaultWarehouseId(db, 'finished');
           if (fw != null && fw != newWhId) {
             await db.execute(
@@ -1733,6 +1763,10 @@ return _json({'transactions': transactions, 'total': transactions.length});
             parameters: [whId],
           );
           await db.execute(
+            'DELETE FROM fh.stock_transfers WHERE source_warehouse_id = \$1 OR dest_warehouse_id = \$1',
+            parameters: [whId],
+          );
+          await db.execute(
             'DELETE FROM fh.production_batches WHERE source_warehouse_id = \$1 OR dest_warehouse_id = \$1',
             parameters: [whId],
           );
@@ -1772,7 +1806,10 @@ if (!Policy.canTransactStock(role)) {
         final note = body['note'] as String?;
         final isRegime51 = body['is_regime_51'] as bool? ?? false;
 
-        final allowedTypes = ['raw_material', 'product', 'spare_part', 'semi_finished', 'item'];
+        final allowedTypes = [
+          'raw_material', 'product', 'spare_part', 'semi_finished', 'item',
+          'packaging', 'semi', 'raw', 'material', 'intermediate', 'finished',
+        ];
         if (warehouseId == null || itemType == null || direction == null || qty == null) {
           return _json(
             {'error': 'warehouse_id, item_type, direction, qty majburiy'},
@@ -1815,7 +1852,7 @@ if (!_grantedWhContains(request, warehouseId)) {
         }
         final whType = whRow.first[1] as String?;
 
-        // ── Imkoniyatga asoslangan oqim nazorati (qo'lda kirim/chiqim) ──
+        // -- Imkoniyatga asoslangan oqim nazorati (qo'lda kirim/chiqim) --
         final canIncome = whRow.first[2] == true;
         final canExpense = whRow.first[3] == true;
         if (direction == 'in' && !canIncome) {
@@ -2062,9 +2099,9 @@ if (warehouseId != null) {
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────────
-    // PRODUCT ↔ WAREHOUSE ASSIGNMENTS (Many-to-Many)
-    // ─────────────────────────────────────────────────────────────────────────────
+    // -----------------------------------------------------------------------------
+    // PRODUCT ? WAREHOUSE ASSIGNMENTS (Many-to-Many)
+    // -----------------------------------------------------------------------------
 
     get('/product-warehouses', (Request request) async {
       try {
@@ -2160,9 +2197,9 @@ if (warehouseId != null) {
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────────
+    // -----------------------------------------------------------------------------
     // INTER-WAREHOUSE TRANSFERS
-    // ─────────────────────────────────────────────────────────────────────────────
+    // -----------------------------------------------------------------------------
 
 get('/transfers', (Request request) async {
       try {
@@ -2200,7 +2237,7 @@ get('/transfers', (Request request) async {
       }
     });
 
-    // POST /transfers/send — qo'lda yuborish (qabul qiluvchi tasdiqlashini kutadi).
+    // POST /transfers/send � qo'lda yuborish (qabul qiluvchi tasdiqlashini kutadi).
     //   body: { item_id, quantity, unit?, source_warehouse_id, dest_warehouse_id, note? }
     // Manba ombor qoldig'idan DARHOL ayiriladi, qabul qiluvchi omborga esa
     // faqat "Qabul qildim" bosilgach qo'shiladi. Yo'nalish fh.warehouse_transfer_routes
@@ -2253,7 +2290,7 @@ get('/transfers', (Request request) async {
             fixedRow.isNotEmpty ? (fixedRow.first[0] as int?) : null;
         if (fixedTo != null && fixedTo != destId) {
           return _json({
-            'error': 'Bu ombor qat\'iy belgilangan omborga transfer qilinadi — manzilni tanlash mumkin emas'
+            'error': 'Bu ombor qat\'iy belgilangan omborga transfer qilinadi � manzilni tanlash mumkin emas'
           }, status: 403);
         }
         final route = await db.execute(
@@ -2261,7 +2298,24 @@ get('/transfers', (Request request) async {
           'WHERE from_warehouse_id = \$1 AND to_warehouse_id = \$2',
           parameters: [srcId, destId],
         );
-        if (route.isEmpty) {
+        // Diller-nazorat: finished/dealer omborlar faol diller omborlariga
+        // qo'lda yo'nalish sozlanmagan bo'lsa ham transfer yuborishi mumkin.
+        String? srcType;
+        for (final r in wh) {
+          if (r[0] == srcId) {
+            srcType = r[2] as String?;
+            break;
+          }
+        }
+        bool autoDealerAllowed = false;
+        if (srcType == 'finished' || srcType == 'dealer') {
+          final dealerRow = await db.execute(
+            'SELECT 1 FROM fh.dealers WHERE warehouse_id = \$1 AND is_active',
+            parameters: [destId],
+          );
+          autoDealerAllowed = dealerRow.isNotEmpty;
+        }
+        if (route.isEmpty && !autoDealerAllowed) {
           return _json({
             'error': 'Bu yo\'nalishga transfer ruxsat etilmagan. Ombor sozlamalarida transfer yo\'nalishini qo\'shing'
           }, status: 403);
@@ -2303,7 +2357,7 @@ get('/transfers', (Request request) async {
           );
           final transferId = tr.first[0];
 
-          // Chiqim YOZILMAYDI — manba ombor qoldig'i faqat qabul qiluvchi
+          // Chiqim YOZILMAYDI � manba ombor qoldig'i faqat qabul qiluvchi
           // ombor "Qabul qildim" (confirm) bosganda kamayadi. Pending paytida
           // ikkala ombor ham o'zgarmaydi.
 
@@ -2325,7 +2379,7 @@ get('/transfers', (Request request) async {
       }
     });
 
-    // GET /transfers/pending — qabul qiluvchi ombor bo'yicha kutilayotgan o'tkazmalar
+    // GET /transfers/pending � qabul qiluvchi ombor bo'yicha kutilayotgan o'tkazmalar
     get('/transfers/pending', (Request request) async {
       try {
         final warehouseId =
@@ -2372,7 +2426,7 @@ get('/transfers', (Request request) async {
       }
     });
 
-    // GET /transfers/pending/summary — har bir ombor uchun kutilayotgan
+    // GET /transfers/pending/summary � har bir ombor uchun kutilayotgan
     // qabul soni (omborlar ro'yxatida badge ko'rsatish uchun).
     get('/transfers/pending/summary', (Request request) async {
       try {
@@ -2456,7 +2510,7 @@ if (info.isEmpty) return _json({'error': 'Topilmadi'}, status: 404);
         final userId = _uid(request);
         final db = await DatabaseConnection.getConnection();
 
-        // ── Imkoniyatga asoslangan oqim nazorati (transfer) ──
+        // -- Imkoniyatga asoslangan oqim nazorati (transfer) --
         final whTypesRow = await db.execute(
           'SELECT id, type, can_transfer FROM fh.warehouses WHERE id IN (\$1, \$2)',
           parameters: [fromId, toId],
@@ -2478,7 +2532,7 @@ if (!(whCanTransfer[fromId] ?? false)) {
             'error': 'Bu ombor uchun transfer imkoniyati yoqilmagan',
           }, status: 403);
         }
-        // Qat'iy tayinlangan ombor bo'lsa — faqat unga transfer ruxsat etiladi.
+        // Qat'iy tayinlangan ombor bo'lsa � faqat unga transfer ruxsat etiladi.
         final fixedRow = await db.execute(
           'SELECT fixed_route_to_id FROM fh.warehouses WHERE id = \$1',
           parameters: [fromId],
@@ -2487,7 +2541,7 @@ if (!(whCanTransfer[fromId] ?? false)) {
             fixedRow.isNotEmpty ? (fixedRow.first[0] as int?) : null;
         if (fixedTo != null && fixedTo != toId) {
           return _json({
-            'error': 'Bu ombor qat\'iy belgilangan omborga transfer qilinadi — manzilni tanlash mumkin emas'
+            'error': 'Bu ombor qat\'iy belgilangan omborga transfer qilinadi � manzilni tanlash mumkin emas'
           }, status: 403);
         }
         // Ruxsat etilgan yo'nalish (warehouse_transfer_routes) mavjud bo'lishi shart.
@@ -2565,9 +2619,9 @@ if (!_fullAccess(role) && userId != null) {
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────────
+    // -----------------------------------------------------------------------------
     // WAREHOUSE REPORT (detailed per-warehouse)
-    // ─────────────────────────────────────────────────────────────────────────────
+    // -----------------------------------------------------------------------------
 
     get('/reports/warehouse', (Request request) async {
       try {
@@ -3096,7 +3150,7 @@ if (!_fullAccess(role) && userId != null) {
               await db.execute('ROLLBACK');
               return _json({
                 'error':
-                    "Xom ashyo yetarli emas: ${norm[1]} â€” kerak ${needKg.toStringAsFixed(3)} ${norm[2]}, mavjud $balance",
+                    "Xom ashyo yetarli emas: ${norm[1]} — kerak ${needKg.toStringAsFixed(3)} ${norm[2]}, mavjud $balance",
               }, status: 409);
             }
 
@@ -3151,9 +3205,9 @@ if (!_fullAccess(role) && userId != null) {
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     //  UNIFIED ITEMS CATALOG (raw, semi, finished, packaging)
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     get('/items', (Request request) async {
       try {
         final db = await DatabaseConnection.getConnection();
@@ -3201,9 +3255,9 @@ if (!_fullAccess(role) && userId != null) {
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  BOM / RECEPT (retsept) CRUD — stage: mixing | packaging
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    //  BOM / RECEPT (retsept) CRUD � stage: mixing | packaging
+    // -------------------------------------------------------------------------
     get('/boms', (Request request) async {
       try {
         final db = await DatabaseConnection.getConnection();
@@ -3303,7 +3357,7 @@ if (!_fullAccess(role) && userId != null) {
         final outItemType = outItem.first[1] as String;
         final outItemName = outItem.first[0] as String;
 
-        // mixing → yarim tayyor/xom item; packaging → tayyor mahsulot itemi kerak
+        // mixing ? yarim tayyor/xom item; packaging ? tayyor mahsulot itemi kerak
         bool typeMatchesStage = false;
         if (stage == 'mixing' &&
             (outItemType == 'semi_finished' || outItemType == 'intermediate' || outItemType == 'semi' || outItemType == 'raw' || outItemType == 'material')) {
@@ -3445,9 +3499,9 @@ put('/boms/<id>', (Request request, String id) async {
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     //  MULTI-STAGE PRODUCTION via BOM (mixing + packaging)
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // POST /production/bom/start
     //   body: { bom_id, batches, source_warehouse_id, dest_warehouse_id, note? }
     //   Consumes BOM items from source_warehouse_id and inserts output into
@@ -3495,7 +3549,7 @@ final outItem = await db.execute(
         final empId = await _resolveWorkEmployeeId(
             db, request, (body['employee_id'] ?? body['employeeId']) as int?);
 
-        // ── Ombor turlarini tekshirish ──
+        // -- Ombor turlarini tekshirish --
         final srcWh = await db.execute(
           'SELECT name, type, can_expense FROM fh.warehouses WHERE id = \$1 AND is_active',
           parameters: [sourceWarehouseId],
@@ -3573,7 +3627,7 @@ final outItem = await db.execute(
             if (balance < needQty - 0.0001) {
               await db.execute('ROLLBACK');
               return _json({
-                'error': "Yetarli emas: $nameSnapshot — kerak ${needQty.toStringAsFixed(3)} $unit, mavjud ${balance.toStringAsFixed(3)}",
+                'error': "Yetarli emas: $nameSnapshot � kerak ${needQty.toStringAsFixed(3)} $unit, mavjud ${balance.toStringAsFixed(3)}",
                 'shortages': [
                   {'name': nameSnapshot, 'needed': needQty, 'available': balance, 'unit': unit}
                 ],
@@ -3653,9 +3707,9 @@ final outItem = await db.execute(
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     //  LOSS / WRITE-OFF
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // POST /stock/write-off
     //   body: { warehouse_id, item_type, ref_id?, ref_barcode?, name?, unit?, qty, reason, note? }
     post('/stock/write-off', (Request request) async {
@@ -3746,9 +3800,9 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  SODDALASHTIRILGAN ISHLAB CHIQARISH (MIXING) — default omborlar bilan
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    //  SODDALASHTIRILGAN ISHLAB CHIQARISH (MIXING) � default omborlar bilan
+    // -------------------------------------------------------------------------
     // GET /production/mixing/preview?bom_id=&output_quantity=
     get('/production/mixing/preview', (Request request) async {
       try {
@@ -3976,9 +4030,9 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  QADOQLASH (PACKAGING) — semi_finished + packaging manbalari
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
+    //  QADOQLASH (PACKAGING) � semi_finished + packaging manbalari
+    // -------------------------------------------------------------------------
     // GET /production/packaging/preview?bom_id=&output_quantity=
     get('/production/packaging/preview', (Request request) async {
       try {
@@ -4046,7 +4100,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
           if (!ok) shortages.add({'name': name, 'unit': unit, 'needed': need, 'available': available, 'group': isPkg ? 'packaging' : 'semi_finished'});
         }
 
-        // Tayyor mahsulot omborlari — faqat yarim tayyor omborining ruxsat
+        // Tayyor mahsulot omborlari � faqat yarim tayyor omborining ruxsat
         // etilgan sheriklari (routes) ichidan. Tanlov mamnuniyati backendda.
         final fixedSem = await db.execute(
           'SELECT fixed_route_to_id FROM fh.warehouses WHERE id = \$1',
@@ -4134,7 +4188,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         if (semiId == null || pkgId == null) {
           return _json({'error': 'Yarim tayyor yoki qadoqlash materiallari ombori belgilanmagan'}, status: 422);
         }
-        // Qat'iy/tayinlangan sherik tekshiruvi — packaging natijasi faqat
+        // Qat'iy/tayinlangan sherik tekshiruvi � packaging natijasi faqat
         // yarim tayyor omborining ruxsat etilgan tayyor omborlariga o'tadi.
         final fixedSem = await db.execute(
           'SELECT fixed_route_to_id FROM fh.warehouses WHERE id = \$1',
@@ -4153,7 +4207,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             parameters: [semiId, destWarehouseId],
           );
           if (okRoute.isNotEmpty) {
-            // ruxsat etilgan tayinlangan sherik — ok
+            // ruxsat etilgan tayinlangan sherik � ok
           } else {
             final hasFinRoutes = await db.execute(
               'SELECT 1 FROM fh.warehouse_transfer_routes r '
@@ -4247,7 +4301,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             parameters: [transferId, batchId]);
 
           // Yangi qoida: qadoqlangan mahsulot darhol tayyor mahsulot omboriga
-          // kiradi — qabul qiluvchi ombor tasdig'ini kutib o'tirmaydi. Transfer
+          // kiradi � qabul qiluvchi ombor tasdig'ini kutib o'tirmaydi. Transfer
           // bir xil transaksiyada confirmed bo'ladi, partiya yakunlanadi.
           final outItemType = (outItem['itemType'] as String?) ?? 'item';
           await db.execute(
@@ -4301,11 +4355,11 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     //  TASDIQLASH ZANJIRI (pending transfers: confirm / reject)
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
     //  TASDIQLASH ZANJIRI (pending transfers: confirm / reject)
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // POST /transfers/<id>/confirm
     post('/transfers/<id>/confirm', (Request request, String id) async {
       if (!Policy.canTransactStock(_role(request))) {
@@ -4340,7 +4394,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         await db.execute('BEGIN');
         try {
           // Qo'lda (batchsiz) o'tkazmalarda manba chiqimi faqat confirm vaqtida
-          // yoziladi — send balansga tegmaydi. Eski qoidalar bilan yuborilgan
+          // yoziladi � send balansga tegmaydi. Eski qoidalar bilan yuborilgan
           // o'tkazmalarda chiqim allaqachon bor, qayta yozilmaydi.
           if (batchId == null && srcId != null) {
             final outExists = await db.execute(
@@ -4508,9 +4562,9 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     //  KARANTIN TEKSHIRUVI (inspections)
-    // ─────────────────────────────────────────────────────────────────────────
+    // -------------------------------------------------------------------------
     // POST /inspections/receive  { item_id, quantity, unit?, quarantine_warehouse_id, note? }
     post('/inspections/receive', (Request request) async {
       if (!Policy.canTransactStock(_role(request))) {
@@ -4644,8 +4698,8 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         final item = await _resolveItem(db, itemId, qWhId) ?? <String, dynamic>{'name': 'Mahsulot'};
         final uid = _uid(request);
 
-        // approved → item turiga qarab: yarim tayyor → semi_finished, aks holda → xom-ashyo
-        // rejected → Brak/nikoz ombori
+        // approved ? item turiga qarab: yarim tayyor ? semi_finished, aks holda ? xom-ashyo
+        // rejected ? Brak/nikoz ombori
         final itemTypeRows = await db.execute(
           'SELECT item_type FROM fh.items WHERE id = \$1',
           parameters: [itemId],
@@ -4681,7 +4735,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             ''',
             parameters: [qWhId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit, qty, inspectionId, uid, note],
           );
-          // Manzil omboriga kirim (approved → raw, rejected → defective)
+          // Manzil omboriga kirim (approved ? raw, rejected ? defective)
           await db.execute(
             '''
             INSERT INTO fh.stock_ledger
@@ -4691,7 +4745,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             ''',
             parameters: [destId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit, qty, inspectionId, uid, note],
           );
-          // Qaror tasdiq hisoblanadi — konfirmatsiya kutilmaydi
+          // Qaror tasdiq hisoblanadi � konfirmatsiya kutilmaydi
           final tr = await db.execute(
             'INSERT INTO fh.stock_transfers '
             '(item_id, quantity, unit, source_warehouse_id, dest_warehouse_id, '
@@ -4917,7 +4971,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
                     entryWarehouseId, entryItemType, entryRefId, entryRefBarcode,
                     entryNameSnapshot, entryUnit, reversalDirection, entryQty,
                     reversalSourceType, batchId.toString(), _uid(request),
-                    'Bekor qilish — reversal #$batchId',
+                    'Bekor qilish � reversal #$batchId',
                   ],
                 );
               }
@@ -5185,15 +5239,15 @@ final counts = await db.execute('''
 }
 
 // ============================================================
-// HR MODULI — xodimlar, davomat, premiya/jarima/avans, hisobot
-// Ruxsatlar: admin/hr_manager — to''liq; director — faqat ko''rish.
+// HR MODULI � xodimlar, davomat, premiya/jarima/avans, hisobot
+// Ruxsatlar: admin/hr_manager � to''liq; director � faqat ko''rish.
 // ============================================================
 extension _HrRoutes on Router {
   void _registerHrRoutes() {
     bool _canRead(Request r) => Policy.canReadHr(_role(r));
     bool _canManage(Request r) => Policy.canManageHr(_role(r));
 
-    // ───────────────────────── XODIMLAR ─────────────────────────
+    // ------------------------- XODIMLAR -------------------------
     get('/hr/employees', (Request request) async {
       if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
       try {
@@ -5388,7 +5442,7 @@ if (body['hireDate'] != null) {
       }
     });
 
-// ───────────────────────── DAVOMAT ─────────────────────────
+// ------------------------- DAVOMAT -------------------------
     // Tizimga kirgan foydalanuvchiga bog'langan faol xodim (employee roli uchun).
     Future<int?> _ownedEmployeeId(Request request) async {
       final uid = _uid(request);
@@ -5418,7 +5472,7 @@ if (body['hireDate'] != null) {
       };
     }
 
-    // check_out 18:00 dan erta bo'lsa — erta ketish.
+    // check_out 18:00 dan erta bo'lsa � erta ketish.
     bool _earlyLeave(String? out) {
       if (out == null) return false;
       final p = DateTime.tryParse('2000-01-01 $out');
@@ -5636,7 +5690,7 @@ put('/hr/attendance/<id>', (Request request, String id) async {
         final existingNote = cur.first[4] as String?;
         final setParts = <String>[];
         final params = <dynamic>[];
-        // Audit jurnali: (field, old, new) — har bir o'zgarish uchun bitta qator.
+        // Audit jurnali: (field, old, new) � har bir o'zgarish uchun bitta qator.
         final audits = <Map<String, String>>[];
         final bodyIn = body['checkIn'] as String?;
         final bodyOut = body['checkOut'] as String?;
@@ -5729,7 +5783,7 @@ put('/hr/attendance/<id>', (Request request, String id) async {
       }
     });
 
-    // ────────────────── DAVOMAT: TARIX (AUDIT) ──────────────────
+    // ------------------ DAVOMAT: TARIX (AUDIT) ------------------
     get('/hr/attendance/<id>/audit', (Request request, String id) async {
       final role = _role(request);
       final isEmp = Policy.isEmployee(role);
@@ -5771,8 +5825,8 @@ put('/hr/attendance/<id>', (Request request, String id) async {
       }
     });
 
-    // ────────────────── DAVOMAT: UNMARKED ──────────────────
-    // Kun oxirida nazoratchi uchun — hali belgilanmagan xodimlar.
+    // ------------------ DAVOMAT: UNMARKED ------------------
+    // Kun oxirida nazoratchi uchun � hali belgilanmagan xodimlar.
     get('/hr/attendance/unmarked', (Request request) async {
       if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
       try {
@@ -5817,7 +5871,7 @@ put('/hr/attendance/<id>', (Request request, String id) async {
       }
     });
 
-    // ────────────────── DAVOMAT: O'Z-O'ZINI BELGILASH ──────────────────
+    // ------------------ DAVOMAT: O'Z-O'ZINI BELGILASH ------------------
     // Xodim GPS orqali "keldim/ketdim" bosadi. Haversine + radius tekshiruvi.
     post('/hr/attendance/self-checkin', (Request request) async {
       final role = _role(request);
@@ -5928,7 +5982,7 @@ put('/hr/attendance/<id>', (Request request, String id) async {
       }
     });
 
-    // ────────────────── DAVOMAT: MEN (o'z holatim) ──────────────────
+    // ------------------ DAVOMAT: MEN (o'z holatim) ------------------
     // Xodim ekrani uchun: bugungi yozuvi + bog'langan xodim id.
     get('/hr/attendance/me', (Request request) async {
       final role = _role(request);
@@ -5968,7 +6022,7 @@ put('/hr/attendance/<id>', (Request request, String id) async {
       }
     });
 
-    // ────────────────── PREMIYA / JARIMA / AVANS ──────────────────
+    // ------------------ PREMIYA / JARIMA / AVANS ------------------
     get('/hr/salary-adjustments', (Request request) async {
       if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
       try {
@@ -6086,7 +6140,7 @@ put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
       return _setAdjustmentStatus(request, id, 'rejected');
     });
 
-    // ───────────────────────── STAVKALAR (piece_rates) ─────────────────────────
+    // ------------------------- STAVKALAR (piece_rates) -------------------------
     Map<String, dynamic> _pieceRateJson(List<dynamic> r) => {
           'id': r[0] as int,
           'workType': r[1] as String,
@@ -6222,7 +6276,7 @@ put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
           'SELECT 1 FROM fh.work_records WHERE piece_rate_id = \$1 LIMIT 1', parameters: [rid]);
         if (used.isNotEmpty) {
           await db.execute('UPDATE fh.piece_rates SET is_active = false WHERE id = \$1', parameters: [rid]);
-          return _json({'message': 'Stavka ishlatilgan — o\'chirilmay, is_active=false qilindi'});
+          return _json({'message': 'Stavka ishlatilgan � o\'chirilmay, is_active=false qilindi'});
         }
         await db.execute('DELETE FROM fh.piece_rates WHERE id = \$1', parameters: [rid]);
         return _json({'message': 'Stavka o\'chirildi'});
@@ -6232,7 +6286,7 @@ put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
       }
     });
 
-    // ───────────────────────── ISH YOZUVLARI (work_records) ─────────────────────────
+    // ------------------------- ISH YOZUVLARI (work_records) -------------------------
     get('/hr/work-records', (Request request) async {
       if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
       try {
@@ -6364,7 +6418,7 @@ put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
       }
     });
 
-    // ───────────────────────── HISOBOT ─────────────────────────
+    // ------------------------- HISOBOT -------------------------
 get('/hr/reports/monthly', (Request request) async {
       if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
       try {

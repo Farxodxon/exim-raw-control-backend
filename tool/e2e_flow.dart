@@ -792,6 +792,103 @@ Future<void> main() async {
   (s, _) = await call('DELETE', '/dealers/$d2Id', tokenStr: adminTok);
   check('dealers: export delete empty', s == 200, 'status=$s');
 
+  // ── 12. DILLER AVTO-MANZILLARI (finished/dealer -> diller) ───────────
+  // finished/dealer omborlar uchun diller omborlari AVTOMATIK transfer
+  // manzili hisoblanadi — qo'lda yo'nalish sozlash shart emas.
+  (s, j) = await call('POST', '/dealers', body: {
+    'name': 'E2E Diller Auto A', 'marketType': 'domestic',
+  }, tokenStr: adminTok);
+  check('auto-dest: dealer A created 201', s == 201, 'status=$s $j');
+  final d3 = j['dealer'] as Map;
+  final d3Id = (d3['id'] as num?)?.toInt();
+  final d3Wh = (d3['warehouseId'] as num?)?.toInt();
+  (s, j) = await call('POST', '/dealers', body: {
+    'name': 'E2E Diller Auto B', 'marketType': 'export',
+  }, tokenStr: adminTok);
+  final d4 = j['dealer'] as Map;
+  final d4Id = (d4['id'] as num?)?.toInt();
+  final d4Wh = (d4['warehouseId'] as num?)?.toInt();
+  check('auto-dest: two dealers with warehouses', d3Wh != null && d4Wh != null, '$j');
+
+  // finished ombor detail: dillerlar avtomatik manzil ro'yxatida. Har qanday
+  // "finished" ombor (qat'iy manzili bo'lmagan) ishlatiladi — whFin real
+  // muhitda qat'iy manzilga ega bo'lishi mumkin, shuning uchun yangi ombor.
+  (s, j) = await call('POST', '/warehouses', body: {
+    'name': 'E2E % AutoDests Fin', 'type': 'finished',
+    'canAnalyze': true, 'canTransfer': true, 'canIncome': true, 'canExpense': true,
+    'transferTo': <int>[],
+  }, tokenStr: adminTok);
+  check('auto-dest: fresh finished wh created 201', s == 201, 'status=$s $j');
+  final myFin = ((j['warehouse'] as Map)['id'] as num?)?.toInt();
+  check('auto-dest: fresh finished wh id', myFin != null, '$j');
+
+  // Detail: dillerlar avtomatik manzil ro'yxatida.
+  (s, j) = await call('GET', '/warehouses/$myFin', tokenStr: adminTok);
+  final finDests = ((j['warehouse'] as Map)['transferToWarehouses'] as List);
+  check('auto-dest: finished detail lists dealer A', finDests.any((e) => (e as Map)['id'] == d3Wh), '$j');
+  check('auto-dest: finished detail lists dealer B', finDests.any((e) => (e as Map)['id'] == d4Wh), '$j');
+  final finIds = ((j['warehouse'] as Map)['transferTo'] as List);
+  check('auto-dest: transferTo ids include both dealers',
+      finIds.contains(d3Wh) && finIds.contains(d4Wh), '$j');
+
+  // dealer manba ham boshqa dillerlarni avtomatik ko'radi (o'zi mustasno).
+  (s, j) = await call('GET', '/warehouses/$d3Wh', tokenStr: adminTok);
+  final d3Dests = ((j['warehouse'] as Map)['transferToWarehouses'] as List);
+  check('auto-dest: dealer A lists dealer B', d3Dests.any((e) => (e as Map)['id'] == d4Wh), '$j');
+  check('auto-dest: dealer A skips self', !d3Dests.any((e) => (e as Map)['id'] == d3Wh), '$j');
+
+  // finished -> diller qo'lda yo'nalishsiz transfer yuboriladi (pending).
+  if (myFin != null) {
+    await c.execute(
+      "INSERT INTO fh.stock_ledger (warehouse_id, item_type, ref_id, name_snapshot, unit, "
+      "direction, qty, source_type, performed_by, note) "
+      "VALUES (\$1, 'finished', \$2, 'E2E Tayyor', 'dona', 'in', 5, 'manual', \$3, 'E2E seed')",
+      parameters: [myFin, iFin, adminId]);
+    (s, j) = await call('POST', '/transfers/send', body: {
+      'item_id': iFin, 'quantity': 1, 'unit': 'dona',
+      'source_warehouse_id': myFin, 'dest_warehouse_id': d3Wh,
+    }, tokenStr: adminTok);
+    check('auto-dest: finished->dealer send 201', s == 201, 'status=$s $j');
+    check('auto-dest: transfer stays pending', j['pending'] == true, '$j');
+    final tD = (j['transferId'] as num?)?.toInt();
+    check('auto-dest: transfer id present', tD != null, '$j');
+
+    // Qabul qiluvchi diller ombori tasdiqlaydi -> balansga qo'shiladi.
+    if (tD != null) {
+      (s, j) = await call('POST', '/transfers/$tD/confirm', tokenStr: adminTok);
+      check('auto-dest: dealer confirm 200', s == 200, 'status=$s $j');
+      final d3Bal = await balance(c, d3Wh!, 'finished', iFin);
+      check('auto-dest: dealer receives 1', d3Bal == 1, 'd3=$d3Bal');
+    }
+  }
+
+  // Non-dealer manba (raw) diller omboriga hali ham ruxsat etilmaydi.
+  (s, j) = await call('POST', '/transfers/send', body: {
+    'item_id': iRaw, 'quantity': 1,
+    'source_warehouse_id': whRaw, 'dest_warehouse_id': d4Wh,
+  }, tokenStr: adminTok);
+  check('auto-dest: raw->dealer still 403', s == 403, 'status=$s $j');
+
+  // Qo'lda transaction: qadoqlash omboriga 'packaging' item_type kirim.
+  final pkgBefore = await balance(c, whPkg, 'packaging', iPkg);
+  (s, j) = await call('POST', '/warehouse/transaction', body: {
+    'warehouse_id': whPkg, 'item_type': 'packaging', 'ref_id': iPkg,
+    'name': 'E2E Qop', 'unit': 'dona', 'direction': 'in', 'qty': 10, 'note': 'E2E packaging manual',
+  }, tokenStr: adminTok);
+  check('auto-dest: packaging manual in 201', s == 201, 'status=$s $j');
+  final pkgAfter = await balance(c, whPkg, 'packaging', iPkg);
+  check('auto-dest: packaging balance +10', pkgAfter == pkgBefore + 10, 'pkg=$pkgAfter before=$pkgBefore');
+
+  // Dillerlarni tozalash (qoldiq tozalanib o'chiriladi) + yangi ombor.
+  await c.execute('DELETE FROM fh.stock_ledger WHERE warehouse_id IN (\$1, \$2, \$3)',
+      parameters: [d3Wh, d4Wh, myFin]);
+  (s, _) = await call('DELETE', '/warehouses/$myFin', tokenStr: adminTok);
+  check('auto-dest: fresh finished wh deleted 200', s == 200, 'status=$s');
+  (s, _) = await call('DELETE', '/dealers/$d3Id', tokenStr: adminTok);
+  check('auto-dest: dealer A delete 200', s == 200, 'status=$s');
+  (s, _) = await call('DELETE', '/dealers/$d4Id', tokenStr: adminTok);
+  check('auto-dest: dealer B delete 200', s == 200, 'status=$s');
+
   // ── GPS / SELF-CHECKIN / AUDIT / UNMARKED ──────────────────────────────────
 
   // GPS joylashuvi: "Asosiy ofis" (41.311081, 69.240562, radius=200).
