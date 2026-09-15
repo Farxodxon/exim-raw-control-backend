@@ -9,6 +9,7 @@ import 'package:exim_raw_backend/factoryhub/jwt.dart';
 import 'package:exim_raw_backend/factoryhub/policy.dart';
 import 'package:exim_raw_backend/factoryhub/user_storage.dart';
 import 'package:exim_raw_backend/factoryhub/hr_models.dart';
+import 'package:exim_raw_backend/factoryhub/payroll.dart' as payroll;
 import 'package:excel/excel.dart';
 
 final Router _router = Router().._registerRoutes();
@@ -23,7 +24,7 @@ Response _json(Object? body, {int status = 200}) => Response(
       headers: {'Content-Type': 'application/json'},
     );
 
-// Ikki koordinata orasidagi masofa (metr) — Haversine formulasi.
+// Ikki koordinata orasidagi masofa (metr) ï¿½ Haversine formulasi.
 double _haversineMeters(double lat1, double lon1, double lat2, double lon2) {
   const r = 6371000.0;
   double rad(double d) => d * math.pi / 180.0;
@@ -76,7 +77,7 @@ String? _moduleKeyForPath(String path) {
   if (path.startsWith('production/packaging')) return 'packaging';
   if (path.startsWith('production/')) return 'production';
   // Qabul tasdiqlash (transfers/pending, confirm, reject) chegirmasi MODUL
-  // emas, omborga kirish (user_warehouses) orqali beriladi — shuning uchun
+  // emas, omborga kirish (user_warehouses) orqali beriladi ï¿½ shuning uchun
   // bu yerda sezilarli emas: nazorat berilgan har kimga ko'rinadi.
   if (path.startsWith('inspections/')) return 'inspection';
   if (path.startsWith('hr/')) return 'hr';
@@ -276,7 +277,7 @@ final payload = FhJwt.getUserFromToken(authHeader);
     final uid = payload['user_id'] as int?;
 
     // Modul-va-omborga asoslangan ruxsatlar.
-    // Admin/director — to'liq kirish; qolganlar faqat biriktirilgan
+    // Admin/director ï¿½ to'liq kirish; qolganlar faqat biriktirilgan
     // omborlar (user_warehouses) va modullar (user_modules) bo'yicha.
     if (role != AppRoles.admin &&
         role != AppRoles.director &&
@@ -285,13 +286,13 @@ final payload = FhJwt.getUserFromToken(authHeader);
       final whGranted = await _grantedWarehouseIds(uid);
       final modGranted = await _grantedModuleKeys(uid);
 
-      // warehouse_id query parametri — biriktirilgan omborda bo'lishi shart.
+      // warehouse_id query parametri ï¿½ biriktirilgan omborda bo'lishi shart.
       final qwh = int.tryParse(request.url.queryParameters['warehouse_id'] ?? '');
       if (qwh != null && !whGranted.contains(qwh)) {
         return _json({'error': 'Bu omborga kirish ruxsati yo\'q'}, status: 403);
       }
 
-      // /warehouses/<id>... — path'dagi ombor ID sini tekshirish.
+      // /warehouses/<id>... ï¿½ path'dagi ombor ID sini tekshirish.
       final whPath = RegExp(r'^warehouses/(\d+)').firstMatch(path);
       if (whPath != null) {
         final wid = int.tryParse(whPath.group(1)!);
@@ -300,13 +301,13 @@ final payload = FhJwt.getUserFromToken(authHeader);
         }
       }
 
-      // Modul path'lar — grant bo'lishi shart.
+      // Modul path'lar ï¿½ grant bo'lishi shart.
       final mk = _moduleKeyForPath(path);
       if (mk != null && !modGranted.contains(mk)) {
         return _json({'error': 'Bu bo\'limga kirish ruxsati yo\'q'}, status: 403);
       }
 
-      // Hisobotlar ombor bilan bog'liq — ombori bo'lmagan foydalanuvchiga yopiq.
+      // Hisobotlar ombor bilan bog'liq ï¿½ ombori bo'lmagan foydalanuvchiga yopiq.
       if (path.startsWith('reports/') && whGranted.isEmpty) {
         return _json({'error': 'Ruxsat yo\'q'}, status: 403);
       }
@@ -751,7 +752,7 @@ final user = await FhUserStorage.createUser(
             parameters: [user.id, _uid(request)],
           );
         }
-        // employee_id berilgan bo'lsa — xodimni yaratilgan loginga bog'laymiz.
+        // employee_id berilgan bo'lsa ï¿½ xodimni yaratilgan loginga bog'laymiz.
         final employeeId = body['employee_id'] as int?;
         if (employeeId != null) {
           await db.execute(
@@ -1335,7 +1336,7 @@ final routesResult = await db.execute(
         );
 
         // Diller manzillari: finished/dealer omborlar uchun barcha faol
-        // diller omborlari AVTOMATIK transfer manzili hisoblanadi — qo'lda
+        // diller omborlari AVTOMATIK transfer manzili hisoblanadi ï¿½ qo'lda
         // yo'nalish sozlash shart emas. Qo'lda qo'shilgan yo'nalishlar va
         // qat'iy (fixed) manzil saqlanib qoladi.
         final destIds = <dynamic>[];
@@ -2237,7 +2238,7 @@ get('/transfers', (Request request) async {
       }
     });
 
-    // POST /transfers/send — qo'lda yuborish (qabul qiluvchi tasdiqlashini kutadi).
+    // POST /transfers/send ï¿½ qo'lda yuborish (qabul qiluvchi tasdiqlashini kutadi).
     //   body: { item_id, quantity, unit?, source_warehouse_id, dest_warehouse_id, note? }
     // Manba ombor qoldig'idan DARHOL ayiriladi, qabul qiluvchi omborga esa
     // faqat "Qabul qildim" bosilgach qo'shiladi. Yo'nalish fh.warehouse_transfer_routes
@@ -2290,7 +2291,7 @@ get('/transfers', (Request request) async {
             fixedRow.isNotEmpty ? (fixedRow.first[0] as int?) : null;
         if (fixedTo != null && fixedTo != destId) {
           return _json({
-            'error': 'Bu ombor qat\'iy belgilangan omborga transfer qilinadi — manzilni tanlash mumkin emas'
+            'error': 'Bu ombor qat\'iy belgilangan omborga transfer qilinadi ï¿½ manzilni tanlash mumkin emas'
           }, status: 403);
         }
         final route = await db.execute(
@@ -2357,7 +2358,7 @@ get('/transfers', (Request request) async {
           );
           final transferId = tr.first[0];
 
-          // Chiqim YOZILMAYDI — manba ombor qoldig'i faqat qabul qiluvchi
+          // Chiqim YOZILMAYDI ï¿½ manba ombor qoldig'i faqat qabul qiluvchi
           // ombor "Qabul qildim" (confirm) bosganda kamayadi. Pending paytida
           // ikkala ombor ham o'zgarmaydi.
 
@@ -2379,7 +2380,7 @@ get('/transfers', (Request request) async {
       }
     });
 
-    // GET /transfers/pending — qabul qiluvchi ombor bo'yicha kutilayotgan o'tkazmalar
+    // GET /transfers/pending ï¿½ qabul qiluvchi ombor bo'yicha kutilayotgan o'tkazmalar
     get('/transfers/pending', (Request request) async {
       try {
         final warehouseId =
@@ -2426,7 +2427,7 @@ get('/transfers', (Request request) async {
       }
     });
 
-    // GET /transfers/pending/summary — har bir ombor uchun kutilayotgan
+    // GET /transfers/pending/summary ï¿½ har bir ombor uchun kutilayotgan
     // qabul soni (omborlar ro'yxatida badge ko'rsatish uchun).
     get('/transfers/pending/summary', (Request request) async {
       try {
@@ -2532,7 +2533,7 @@ if (!(whCanTransfer[fromId] ?? false)) {
             'error': 'Bu ombor uchun transfer imkoniyati yoqilmagan',
           }, status: 403);
         }
-        // Qat'iy tayinlangan ombor bo'lsa — faqat unga transfer ruxsat etiladi.
+        // Qat'iy tayinlangan ombor bo'lsa ï¿½ faqat unga transfer ruxsat etiladi.
         final fixedRow = await db.execute(
           'SELECT fixed_route_to_id FROM fh.warehouses WHERE id = \$1',
           parameters: [fromId],
@@ -2541,7 +2542,7 @@ if (!(whCanTransfer[fromId] ?? false)) {
             fixedRow.isNotEmpty ? (fixedRow.first[0] as int?) : null;
         if (fixedTo != null && fixedTo != toId) {
           return _json({
-            'error': 'Bu ombor qat\'iy belgilangan omborga transfer qilinadi — manzilni tanlash mumkin emas'
+            'error': 'Bu ombor qat\'iy belgilangan omborga transfer qilinadi ï¿½ manzilni tanlash mumkin emas'
           }, status: 403);
         }
         // Ruxsat etilgan yo'nalish (warehouse_transfer_routes) mavjud bo'lishi shart.
@@ -3256,7 +3257,7 @@ if (!_fullAccess(role) && userId != null) {
     });
 
     // -------------------------------------------------------------------------
-    //  BOM / RECEPT (retsept) CRUD — stage: mixing | packaging
+    //  BOM / RECEPT (retsept) CRUD ï¿½ stage: mixing | packaging
     // -------------------------------------------------------------------------
     get('/boms', (Request request) async {
       try {
@@ -3627,7 +3628,7 @@ final outItem = await db.execute(
             if (balance < needQty - 0.0001) {
               await db.execute('ROLLBACK');
               return _json({
-                'error': "Yetarli emas: $nameSnapshot — kerak ${needQty.toStringAsFixed(3)} $unit, mavjud ${balance.toStringAsFixed(3)}",
+                'error': "Yetarli emas: $nameSnapshot ï¿½ kerak ${needQty.toStringAsFixed(3)} $unit, mavjud ${balance.toStringAsFixed(3)}",
                 'shortages': [
                   {'name': nameSnapshot, 'needed': needQty, 'available': balance, 'unit': unit}
                 ],
@@ -3801,7 +3802,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
     });
 
     // -------------------------------------------------------------------------
-    //  SODDALASHTIRILGAN ISHLAB CHIQARISH (MIXING) — default omborlar bilan
+    //  SODDALASHTIRILGAN ISHLAB CHIQARISH (MIXING) ï¿½ default omborlar bilan
     // -------------------------------------------------------------------------
     // GET /production/mixing/preview?bom_id=&output_quantity=
     get('/production/mixing/preview', (Request request) async {
@@ -4031,7 +4032,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
     });
 
     // -------------------------------------------------------------------------
-    //  QADOQLASH (PACKAGING) — semi_finished + packaging manbalari
+    //  QADOQLASH (PACKAGING) ï¿½ semi_finished + packaging manbalari
     // -------------------------------------------------------------------------
     // GET /production/packaging/preview?bom_id=&output_quantity=
     get('/production/packaging/preview', (Request request) async {
@@ -4100,7 +4101,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
           if (!ok) shortages.add({'name': name, 'unit': unit, 'needed': need, 'available': available, 'group': isPkg ? 'packaging' : 'semi_finished'});
         }
 
-        // Tayyor mahsulot omborlari — faqat yarim tayyor omborining ruxsat
+        // Tayyor mahsulot omborlari ï¿½ faqat yarim tayyor omborining ruxsat
         // etilgan sheriklari (routes) ichidan. Tanlov mamnuniyati backendda.
         final fixedSem = await db.execute(
           'SELECT fixed_route_to_id FROM fh.warehouses WHERE id = \$1',
@@ -4188,7 +4189,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         if (semiId == null || pkgId == null) {
           return _json({'error': 'Yarim tayyor yoki qadoqlash materiallari ombori belgilanmagan'}, status: 422);
         }
-        // Qat'iy/tayinlangan sherik tekshiruvi — packaging natijasi faqat
+        // Qat'iy/tayinlangan sherik tekshiruvi ï¿½ packaging natijasi faqat
         // yarim tayyor omborining ruxsat etilgan tayyor omborlariga o'tadi.
         final fixedSem = await db.execute(
           'SELECT fixed_route_to_id FROM fh.warehouses WHERE id = \$1',
@@ -4207,7 +4208,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             parameters: [semiId, destWarehouseId],
           );
           if (okRoute.isNotEmpty) {
-            // ruxsat etilgan tayinlangan sherik — ok
+            // ruxsat etilgan tayinlangan sherik ï¿½ ok
           } else {
             final hasFinRoutes = await db.execute(
               'SELECT 1 FROM fh.warehouse_transfer_routes r '
@@ -4301,7 +4302,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             parameters: [transferId, batchId]);
 
           // Yangi qoida: qadoqlangan mahsulot darhol tayyor mahsulot omboriga
-          // kiradi — qabul qiluvchi ombor tasdig'ini kutib o'tirmaydi. Transfer
+          // kiradi ï¿½ qabul qiluvchi ombor tasdig'ini kutib o'tirmaydi. Transfer
           // bir xil transaksiyada confirmed bo'ladi, partiya yakunlanadi.
           final outItemType = (outItem['itemType'] as String?) ?? 'item';
           await db.execute(
@@ -4394,7 +4395,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
         await db.execute('BEGIN');
         try {
           // Qo'lda (batchsiz) o'tkazmalarda manba chiqimi faqat confirm vaqtida
-          // yoziladi — send balansga tegmaydi. Eski qoidalar bilan yuborilgan
+          // yoziladi ï¿½ send balansga tegmaydi. Eski qoidalar bilan yuborilgan
           // o'tkazmalarda chiqim allaqachon bor, qayta yozilmaydi.
           if (batchId == null && srcId != null) {
             final outExists = await db.execute(
@@ -4745,7 +4746,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
             ''',
             parameters: [destId, (item['itemType'] as String?) ?? 'item', itemId, item['name'], unit, qty, inspectionId, uid, note],
           );
-          // Qaror tasdiq hisoblanadi — konfirmatsiya kutilmaydi
+          // Qaror tasdiq hisoblanadi ï¿½ konfirmatsiya kutilmaydi
           final tr = await db.execute(
             'INSERT INTO fh.stock_transfers '
             '(item_id, quantity, unit, source_warehouse_id, dest_warehouse_id, '
@@ -4971,7 +4972,7 @@ if (warehouseId == null || itemType == null || qty == null || qty <= 0 ||
                     entryWarehouseId, entryItemType, entryRefId, entryRefBarcode,
                     entryNameSnapshot, entryUnit, reversalDirection, entryQty,
                     reversalSourceType, batchId.toString(), _uid(request),
-                    'Bekor qilish — reversal #$batchId',
+                    'Bekor qilish ï¿½ reversal #$batchId',
                   ],
                 );
               }
@@ -5239,8 +5240,8 @@ final counts = await db.execute('''
 }
 
 // ============================================================
-// HR MODULI — xodimlar, davomat, premiya/jarima/avans, hisobot
-// Ruxsatlar: admin/hr_manager — to''liq; director — faqat ko''rish.
+// HR MODULI ï¿½ xodimlar, davomat, premiya/jarima/avans, hisobot
+// Ruxsatlar: admin/hr_manager ï¿½ to''liq; director ï¿½ faqat ko''rish.
 // ============================================================
 extension _HrRoutes on Router {
   void _registerHrRoutes() {
@@ -5472,7 +5473,7 @@ if (body['hireDate'] != null) {
       };
     }
 
-    // check_out 18:00 dan erta bo'lsa — erta ketish.
+    // check_out 18:00 dan erta bo'lsa ï¿½ erta ketish.
     bool _earlyLeave(String? out) {
       if (out == null) return false;
       final p = DateTime.tryParse('2000-01-01 $out');
@@ -5690,7 +5691,7 @@ put('/hr/attendance/<id>', (Request request, String id) async {
         final existingNote = cur.first[4] as String?;
         final setParts = <String>[];
         final params = <dynamic>[];
-        // Audit jurnali: (field, old, new) — har bir o'zgarish uchun bitta qator.
+        // Audit jurnali: (field, old, new) ï¿½ har bir o'zgarish uchun bitta qator.
         final audits = <Map<String, String>>[];
         final bodyIn = body['checkIn'] as String?;
         final bodyOut = body['checkOut'] as String?;
@@ -5826,7 +5827,7 @@ put('/hr/attendance/<id>', (Request request, String id) async {
     });
 
     // ------------------ DAVOMAT: UNMARKED ------------------
-    // Kun oxirida nazoratchi uchun — hali belgilanmagan xodimlar.
+    // Kun oxirida nazoratchi uchun ï¿½ hali belgilanmagan xodimlar.
     get('/hr/attendance/unmarked', (Request request) async {
       if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
       try {
@@ -6276,7 +6277,7 @@ put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
           'SELECT 1 FROM fh.work_records WHERE piece_rate_id = \$1 LIMIT 1', parameters: [rid]);
         if (used.isNotEmpty) {
           await db.execute('UPDATE fh.piece_rates SET is_active = false WHERE id = \$1', parameters: [rid]);
-          return _json({'message': 'Stavka ishlatilgan — o\'chirilmay, is_active=false qilindi'});
+          return _json({'message': 'Stavka ishlatilgan ï¿½ o\'chirilmay, is_active=false qilindi'});
         }
         await db.execute('DELETE FROM fh.piece_rates WHERE id = \$1', parameters: [rid]);
         return _json({'message': 'Stavka o\'chirildi'});
@@ -6311,11 +6312,24 @@ put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
           params.add(month);
           where += ' AND to_char(wr.work_date, \'YYYY-MM\') = \$${params.length}';
         }
+        if (q['from'] != null && q['from']!.isNotEmpty) {
+          params.add(q['from']);
+          where += ' AND wr.work_date >= \$${params.length}';
+        }
+        if (q['to'] != null && q['to']!.isNotEmpty) {
+          params.add(q['to']);
+          where += ' AND wr.work_date <= \$${params.length}';
+        }
+        if (q['day_type'] != null && q['day_type']!.isNotEmpty) {
+          params.add(q['day_type']);
+          where += ' AND wr.day_type = \$${params.length}';
+        }
         final db = await DatabaseConnection.getConnection();
         final res = await db.execute(
           'SELECT wr.id, wr.employee_id, e.full_name, wr.work_date, wr.work_type, '
           'wr.item_id, i.name, wr.quantity, wr.unit, wr.rate_applied, '
-          'wr.computed_amount, wr.status, wr.note, wr.piece_rate_id, wr.production_batch_id '
+          'wr.computed_amount, wr.status, wr.note, wr.piece_rate_id, wr.production_batch_id, '
+          'wr.hours_worked, wr.day_type '
           'FROM fh.work_records wr '
           'LEFT JOIN fh.employees e ON e.id = wr.employee_id '
           'LEFT JOIN fh.items i ON i.id = wr.item_id '
@@ -6338,6 +6352,8 @@ put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
               'note': r[12] as String?,
               'pieceRateId': r[13],
               'productionBatchId': r[14],
+              'hoursWorked': r[15]?.toString(),
+              'dayType': r[16] as String?,
             }).toList();
         return _json({'records': list});
       } catch (e) {
@@ -6351,22 +6367,58 @@ put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
       try {
         final body = await _body(request);
         final empId = body['employeeId'] as int?;
-        final workType = body['workType'] as String?;
-        final quantity = (body['quantity'] as num?)?.toDouble();
+        final workType = (body['workType'] as String?)?.trim();
+        final quantity = (body['quantity'] as num?)?.toDouble() ?? 0;
         final unit = (body['unit'] as String?)?.trim();
-        if (empId == null || workType == null || quantity == null || quantity <= 0 ||
-            unit == null || unit.isEmpty) {
-          return _json({'error': 'employeeId, workType, quantity (>0), unit majburiy'}, status: 400);
+        final hoursWorked = (body['hoursWorked'] as num?)?.toDouble();
+        final dayType = (body['dayType'] as String?)?.trim();
+        if (empId == null) {
+          return _json({'error': 'employeeId majburiy'}, status: 400);
         }
-        const allowed = ['mixing', 'packaging', 'other'];
-        if (!allowed.contains(workType)) {
+        const allowedWorkTypes = ['mixing', 'packaging', 'other'];
+        if (workType != null && workType.isNotEmpty && !allowedWorkTypes.contains(workType)) {
           return _json({'error': 'workType noto\'g\'ri (mixing|packaging|other)'}, status: 400);
         }
+        const allowedDayTypes = ['sof_qadoqlash', 'sof_soatbay', 'aralash'];
+        if (dayType != null && dayType.isNotEmpty && !allowedDayTypes.contains(dayType)) {
+          return _json({'error': 'dayType noto\'g\'ri (sof_qadoqlash|sof_soatbay|aralash)'}, status: 400);
+        }
+        if (dayType == null || dayType.isEmpty) {
+          if (quantity <= 0) {
+            return _json({'error': 'dayType berilmasa quantity (>0) majburiy'}, status: 400);
+          }
+          if ((unit == null || unit.isEmpty) && workType == null) {
+            return _json({'error': 'unit yoki workType kerak'}, status: 400);
+          }
+        } else {
+          if (dayType == 'sof_soatbay' && (hoursWorked == null || hoursWorked <= 0)) {
+            return _json({'error': 'sof_soatbay uchun hoursWorked (>0) majburiy'}, status: 400);
+          }
+          if ((dayType == 'sof_qadoqlash' || dayType == 'aralash') && quantity <= 0) {
+            return _json({'error': '$dayType uchun quantity (>0) majburiy'}, status: 400);
+          }
+          if (dayType == 'aralash' && (hoursWorked == null || hoursWorked <= 0)) {
+            return _json({'error': 'aralash uchun hoursWorked (>0) majburiy'}, status: 400);
+          }
+          if (dayType == 'sof_soatbay' && quantity > 0) {
+            return _json({'error': 'sof_soatbay uchun quantity 0 bo\'lishi kerak'}, status: 400);
+          }
+        }
+        final finalWorkType = (workType == null || workType.isEmpty) ? 'other' : workType;
+        final finalUnit = (unit == null || unit.isEmpty) ? 'dona' : unit;
         final db = await DatabaseConnection.getConnection();
         var rate = (body['rateApplied'] as num?)?.toDouble();
         int? rateId = body['pieceRateId'] as int?;
         if (rate == null && rateId == null) {
-          return _json({'error': 'rateApplied yoki pieceRateId kerak'}, status: 400);
+          final rr = await db.execute(
+            'SELECT id, rate_per_unit FROM fh.piece_rates WHERE work_type = \$1 AND is_active '
+            'ORDER BY (item_id IS NOT NULL), id LIMIT 1',
+            parameters: [finalWorkType]);
+          if (rr.isEmpty) {
+            return _json({'error': 'rateApplied yoki pieceRateId kerak (stavka topilmadi)'}, status: 400);
+          }
+          rateId = rr.first[0] as int;
+          rate = double.parse(rr.first[1].toString());
         }
         if (rate == null) {
           final rr = await db.execute(
@@ -6376,28 +6428,42 @@ put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
           rate = double.parse(rr.first[1].toString());
         }
         final workDate = body['workDate'] as String?;
+        // sof_soatbay/aralash kunlarda o'rta stavka oy yakunida hisoblanadi.
+        final isPending = dayType == 'sof_soatbay' || dayType == 'aralash';
+        final computed = isPending ? null : (quantity * rate);
+        final finalStatus =
+            body['status'] as String? ?? (isPending ? 'pending' : 'approved');
         final res = await db.execute(
           '''INSERT INTO fh.work_records
              (employee_id, work_date, work_type, item_id, quantity, unit,
-              piece_rate_id, rate_applied, computed_amount, production_batch_id, status, note)
-             VALUES (\$1, COALESCE(\$2::date, CURRENT_DATE), \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12)
-             RETURNING id''',
+              piece_rate_id, rate_applied, computed_amount, production_batch_id, status,
+              hours_worked, day_type, note)
+             VALUES (\$1, COALESCE(\$2::date, CURRENT_DATE), \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12, \$13, \$14)
+             RETURNING id, hours_worked, day_type''',
           parameters: [
             empId,
             (workDate == null || workDate.isEmpty) ? null : workDate,
-            workType,
+            finalWorkType,
             body['itemId'] as int?,
             quantity,
-            unit,
+            finalUnit,
             rateId,
             rate,
-            quantity * rate,
+            computed,
             body['productionBatchId'] as int?,
-            body['status'] as String? ?? 'approved',
+            finalStatus,
+            hoursWorked,
+            dayType == null || dayType.isEmpty ? null : dayType,
             body['note'],
           ],
         );
-        return _json({'id': res.first[0], 'computedAmount': (quantity * rate).toStringAsFixed(2)}, status: 201);
+        final row = res.first;
+        return _json({
+          'id': row[0],
+          'hoursWorked': row[1]?.toString(),
+          'dayType': row[2] as String?,
+          'computedAmount': computed?.toStringAsFixed(2),
+        }, status: 201);
       } catch (e) {
         print('hr work-records POST xato: $e');
         return _json({'error': 'Server xatosi'}, status: 500);
@@ -6414,6 +6480,164 @@ put('/hr/salary-adjustments/<id>/reject', (Request request, String id) async {
         return _json({'message': 'Ish yozuvi o\'chirildi'});
       } catch (e) {
         print('hr work-records DELETE xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ------------------------- BAYRAM/DAM KALENDARI -------------------------
+    get('/hr/holidays', (Request request) async {
+      if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final q = request.url.queryParameters;
+        final params = <dynamic>[];
+        var where = 'TRUE';
+        if (q['month'] != null && q['month']!.isNotEmpty) {
+          params.add(q['month']);
+          where += ' AND to_char(holiday_date, \'YYYY-MM\') = \$${params.length}';
+        }
+        if (q['from'] != null && q['from']!.isNotEmpty) {
+          params.add(q['from']);
+          where += ' AND holiday_date >= \$${params.length}';
+        }
+        if (q['to'] != null && q['to']!.isNotEmpty) {
+          params.add(q['to']);
+          where += ' AND holiday_date <= \$${params.length}';
+        }
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          'SELECT id, holiday_date, label, created_by, created_at '
+          'FROM fh.holidays WHERE ${where} ORDER BY holiday_date',
+          parameters: params,
+        );
+        final list = res.map((r) => {
+              'id': r[0],
+              'holidayDate': (r[1] as DateTime).toIso8601String().substring(0, 10),
+              'label': r[2],
+              'createdBy': r[3],
+              'createdAt': (r[4] as DateTime).toIso8601String(),
+            }).toList();
+        return _json({'holidays': list});
+      } catch (e) {
+        print('hr holidays GET xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    post('/hr/holidays', (Request request) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final body = await _body(request);
+        final dateStr = (body['holidayDate'] as String?)?.trim();
+        final label = (body['label'] as String?)?.trim() ?? 'Bayram';
+        final date = DateTime.tryParse(dateStr ?? '');
+        if (date == null) {
+          return _json({'error': 'holidayDate (YYYY-MM-DD) majburiy'}, status: 400);
+        }
+        if (label.isEmpty) {
+          return _json({'error': 'label bo\'sh bo\'la olmaydi'}, status: 400);
+        }
+        final uid = _uid(request);
+        final db = await DatabaseConnection.getConnection();
+        try {
+          final res = await db.execute(
+            'INSERT INTO fh.holidays (holiday_date, label, created_by) '
+            'VALUES (\$1, \$2, \$3) RETURNING id, holiday_date, label, created_by, created_at',
+            parameters: [
+              dateStr,
+              label,
+              uid,
+            ],
+          );
+          final r = res.first;
+          return _json({
+            'holiday': {
+              'id': r[0],
+              'holidayDate': (r[1] as DateTime).toIso8601String().substring(0, 10),
+              'label': r[2],
+              'createdBy': r[3],
+              'createdAt': (r[4] as DateTime).toIso8601String(),
+            }
+          }, status: 201);
+        } on ServerException catch (e) {
+          if (e.code == '23505') {
+            return _json({'error': 'Bu sana allaqachon bayram sifatida qo\'shilgan'}, status: 409);
+          }
+          rethrow;
+        }
+      } catch (e) {
+        print('hr holidays POST xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    put('/hr/holidays/<id>', (Request request, String id) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      final hid = int.tryParse(id);
+      if (hid == null) return _json({'error': 'Noto\'g\'ri id'}, status: 400);
+      try {
+        final body = await _body(request);
+        final dateStr = (body['holidayDate'] as String?)?.trim();
+        final label = (body['label'] as String?)?.trim();
+        if ((dateStr == null || dateStr.isEmpty) && (label == null || label.isEmpty)) {
+          return _json({'error': 'holidayDate yoki label kerak'}, status: 400);
+        }
+        final sets = <String>[];
+        final params = <dynamic>[];
+        if (dateStr != null && dateStr.isNotEmpty) {
+          if (DateTime.tryParse(dateStr) == null) {
+            return _json({'error': 'holidayDate noto\'g\'ri format'}, status: 400);
+          }
+          params.add(dateStr);
+          sets.add('holiday_date = \$${params.length}');
+        }
+        if (label != null && label.isNotEmpty) {
+          params.add(label);
+          sets.add('label = \$${params.length}');
+        }
+        params.add(hid);
+        final db = await DatabaseConnection.getConnection();
+        try {
+          final res = await db.execute(
+            'UPDATE fh.holidays SET ${sets.join(', ')} WHERE id = \$${params.length} '
+            'RETURNING id, holiday_date, label, created_by, created_at',
+            parameters: params,
+          );
+          if (res.isEmpty) return _json({'error': 'Bayram topilmadi'}, status: 404);
+          final r = res.first;
+          return _json({
+            'holiday': {
+              'id': r[0],
+              'holidayDate': (r[1] as DateTime).toIso8601String().substring(0, 10),
+              'label': r[2],
+              'createdBy': r[3],
+              'createdAt': (r[4] as DateTime).toIso8601String(),
+            }
+          });
+        } on ServerException catch (e) {
+          if (e.code == '23505') {
+            return _json({'error': 'Bu sana allaqachon bayram sifatida qo\'shilgan'}, status: 409);
+          }
+          rethrow;
+        }
+      } catch (e) {
+        print('hr holidays PUT xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    delete('/hr/holidays/<id>', (Request request, String id) async {
+      if (!_canManage(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      final hid = int.tryParse(id);
+      if (hid == null) return _json({'error': 'Noto\'g\'ri id'}, status: 400);
+      try {
+        final db = await DatabaseConnection.getConnection();
+        final res = await db.execute(
+          'DELETE FROM fh.holidays WHERE id = \$1 RETURNING id',
+          parameters: [hid]);
+        if (res.isEmpty) return _json({'error': 'Bayram topilmadi'}, status: 404);
+        return _json({'message': 'Bayram o\'chirildi'});
+      } catch (e) {
+        print('hr holidays DELETE xato: $e');
         return _json({'error': 'Server xatosi'}, status: 500);
       }
     });
@@ -6469,9 +6693,177 @@ get('/hr/reports/monthly', (Request request) async {
           'totalAdvance': r[16]?.toString(),
           'netAmount': r[17]?.toString() ?? '0',
         }).toList();
-        return _json({'rows': list});
+return _json({'rows': list});
       } catch (e) {
         print('hr reports monthly xato: $e');
+        return _json({'error': 'Server xatosi'}, status: 500);
+      }
+    });
+
+    // ------------------------- OYLIK ISH HAQI (payroll.dart) -------------------------
+    get('/hr/monthly-report', (Request request) async {
+      if (!_canRead(request)) return _json({'error': 'Ruxsat yoq'}, status: 403);
+      try {
+        final q = request.url.queryParameters;
+        final now = DateTime.now();
+        final year = int.tryParse(q['year'] ?? '') ?? now.year;
+        final monthNum = int.tryParse(q['month'] ?? '') ?? now.month;
+        if (monthNum < 1 || monthNum > 12) {
+          return _json({'error': 'month 1..12 oralig\'ida bo\'lishi kerak'}, status: 400);
+        }
+        final monthStart = DateTime(year, monthNum);
+        final monthEnd = DateTime(year, monthNum + 1);
+        final monthStartStr = '$year-${monthNum.toString().padLeft(2, '0')}-01';
+        final monthEndStr = '${monthEnd.year}-${monthEnd.month.toString().padLeft(2, '0')}-01';
+        final empFilter = int.tryParse(q['employee_id'] ?? '');
+        final db = await DatabaseConnection.getConnection();
+
+        final holRes = await db.execute('SELECT holiday_date FROM fh.holidays');
+        final holidays = holRes.map((r) {
+          final d = r[0] as DateTime;
+          return DateTime(d.year, d.month, d.day);
+        }).toList();
+
+        var empWhere = "e.status = 'active'";
+        final empParams = <dynamic>[];
+        if (empFilter != null) {
+          empParams.add(empFilter);
+          empWhere += ' AND e.id = \$${empParams.length}';
+        }
+        empParams.add(monthStartStr);
+        empParams.add(monthEndStr);
+        final empRes = await db.execute(
+          'SELECT e.id, e.full_name, e.position, e.department, e.pay_type, e.base_salary '
+          'FROM fh.employees e WHERE ${empWhere} '
+          'AND (COALESCE(e.base_salary, 0) > 0 '
+          'OR EXISTS (SELECT 1 FROM fh.attendance a WHERE a.employee_id = e.id '
+          '            AND a.work_date >= \$${empParams.length - 1} AND a.work_date < \$${empParams.length}) '
+          'OR EXISTS (SELECT 1 FROM fh.work_records wr WHERE wr.employee_id = e.id '
+          '            AND wr.work_date >= \$${empParams.length - 1} AND wr.work_date < \$${empParams.length})) '
+          'ORDER BY e.full_name',
+          parameters: empParams,
+        );
+
+        final rows = <Map<String, dynamic>>[];
+        var totalPayroll = 0.0;
+        for (final e in empRes) {
+          final empId = e[0] as int;
+          final payType = (e[4] as String?) ?? 'salary';
+          final baseSalary = double.tryParse((e[5] ?? '0').toString()) ?? 0.0;
+
+          final attRes = await db.execute(
+            'SELECT work_date, status, COALESCE(overtime_hours, 0) FROM fh.attendance '
+            'WHERE employee_id = \$1 AND work_date >= \$2::date AND work_date < \$3::date',
+            parameters: [empId, monthStartStr, monthEndStr]);
+          var restDaysWorked = 0.0;
+          var workdayOtHours = 0.0;
+          var presentWorkdays = 0;
+          for (final a in attRes) {
+            final d = a[0] as DateTime;
+            final dd = DateTime(d.year, d.month, d.day);
+            final isRest =
+                d.weekday == DateTime.sunday || holidays.contains(dd);
+            if (a[1] == 'present' && isRest) restDaysWorked++;
+            if (!isRest) {
+              workdayOtHours += double.parse((a[2] ?? 0).toString());
+              if (a[1] == 'present') presentWorkdays++;
+            }
+          }
+
+          payroll.SalaryPayroll sp;
+          final hasSalaryPart =
+              payType == 'salary' || payType == 'hybrid';
+          if (hasSalaryPart) {
+            sp = payroll.computeSalaryPayroll(
+              salary: baseSalary,
+              month: monthStart,
+              holidays: holidays,
+              restDaysWorked: restDaysWorked,
+              workdayOvertimeHours: workdayOtHours,
+            );
+          } else {
+            sp = const payroll.SalaryPayroll(
+                workingDays: 0, normHours: 0, hourlyRate: 0,
+                overtimeHours: 0, overtimePay: 0, total: 0);
+          }
+
+          final wrRes = await db.execute(
+            'SELECT work_date, quantity, COALESCE(rate_applied, 0), '
+            'COALESCE(hours_worked, 0), day_type '
+            'FROM fh.work_records '
+            'WHERE employee_id = \$1 AND work_date >= \$2::date AND work_date < \$3::date '
+            'AND status <> \'rejected\'',
+            parameters: [empId, monthStartStr, monthEndStr]);
+          final days = <payroll.PieceDay>[];
+          for (final w in wrRes) {
+            final dt = w[4] as String?;
+            final qty = dt == 'sof_soatbay'
+                ? 0.0
+                : double.parse((w[1] ?? 0).toString());
+            final hrs = dt == 'sof_qadoqlash'
+                ? 0.0
+                : double.parse((w[3] ?? 0).toString());
+            days.add(payroll.PieceDay(
+              employeeId: empId,
+              workDate: w[0] as DateTime,
+              quantity: qty,
+              hours: hrs,
+              rate: double.parse((w[2] ?? 0).toString()),
+            ));
+          }
+          final pp = payroll.computePiecePayroll(days);
+          final hasPiecePart =
+              payType == 'piece_rate' || payType == 'hybrid';
+
+          double rowTotal;
+          if (payType == 'salary') {
+            rowTotal = sp.total;
+          } else if (payType == 'piece_rate') {
+            rowTotal = pp.pieceTotal;
+          } else {
+            rowTotal = sp.total + pp.pieceTotal;
+          }
+          rowTotal = rowTotal.roundToDouble();
+          totalPayroll += rowTotal;
+
+          rows.add({
+            'employeeId': empId,
+            'fullName': e[1],
+            'position': e[2],
+            'department': e[3],
+            'payType': payType,
+            'month': '$year-${monthNum.toString().padLeft(2, '0')}',
+            'workingDays': hasSalaryPart ? sp.workingDays : 0,
+            'normHours': hasSalaryPart ? sp.normHours : 0,
+            'hourlyRate': hasSalaryPart ? sp.hourlyRate.toStringAsFixed(0) : '0',
+            'presentWorkdays': presentWorkdays,
+            'restDaysWorked': restDaysWorked,
+            'workdayOvertimeHours': workdayOtHours.toStringAsFixed(1),
+            'baseSalary': hasSalaryPart ? baseSalary.toStringAsFixed(0) : '0',
+            'overtimeHours': hasSalaryPart ? sp.overtimeHours.toStringAsFixed(1) : '0',
+            'overtimePay': hasSalaryPart ? sp.overtimePay.toStringAsFixed(0) : '0',
+            'pieceDays': hasPiecePart ? days.length : 0,
+            'pieceSofAmount': hasPiecePart ? pp.pieceTotal.toStringAsFixed(0) : '0',
+            'avgHourlyRate': pp.avgHourlyRate?.toStringAsFixed(0) ?? null,
+            'pendingDays': pp.pendingDaysCount,
+            'pieceTotal': hasPiecePart ? pp.pieceTotal.toStringAsFixed(0) : '0',
+            'total': rowTotal.toStringAsFixed(0),
+          });
+        }
+        return _json({
+          'rows': rows,
+          'summary': {
+            'headcount': rows.length,
+            'totalPayroll': totalPayroll.round().toString(),
+            'holidaysCount': holidays.length,
+          },
+          'holidays': holidays
+              .map((d) =>
+                  d.toIso8601String().substring(0, 10))
+              .toList(),
+        });
+      } catch (e) {
+        print('hr monthly-report xato: $e');
         return _json({'error': 'Server xatosi'}, status: 500);
       }
     });

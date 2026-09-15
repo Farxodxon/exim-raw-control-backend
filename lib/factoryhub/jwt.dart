@@ -3,16 +3,18 @@ import 'package:dart_jsonwebtoken/dart_jsonwebtoken.dart';
 import 'package:dotenv/dotenv.dart';
 
 class FhJwt {
+  static DotEnv get _env => DotEnv()..load();
+
   static String get _secret {
-    final secret = Platform.environment['JWT_SECRET'] ?? DotEnv()['JWT_SECRET'];
+    final secret = Platform.environment['JWT_SECRET'] ?? _env['JWT_SECRET'];
     if (secret == null || secret.isEmpty) {
-      throw Exception('JWT_SECRET environment variable sozlanmagan!');
+      throw Exception('JWT_SECRET environment variable sozlanmagan! .env faylini tekshiring');
     }
     return secret;
   }
 
   static String get setupSecretKey =>
-      Platform.environment['SETUP_SECRET_KEY'] ?? (DotEnv()['SETUP_SECRET_KEY'] ?? '');
+      Platform.environment['SETUP_SECRET_KEY'] ?? (_env['SETUP_SECRET_KEY'] ?? '');
 
   static const Duration _expiry = Duration(hours: 24);
 

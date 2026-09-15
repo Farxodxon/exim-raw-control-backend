@@ -40,9 +40,10 @@ exim-raw-control-backend/
 │   ├── database/
 │   │   └── connection.dart      # Neon connection pool
 │   └── factoryhub/
-│       ├── api.dart             # Asosiy API: /fh/* route'lari (~6400 qator)
+│       ├── api.dart             # Asosiy API: /fh/* route'lari (~6900 qator)
 │       ├── hr_models.dart       # AttendanceRecord, WorkRecord modellari
-│       ├── jwt.dart             # JWT generate/verify
+│       ├── payroll.dart         # Payroll v2 yadro: computeSalaryPayroll / computePiecePayroll
+│       ├── jwt.dart             # JWT generate/verify (DotEnv()..load() dan o'qiydi)
 │       ├── policy.dart          # Ruxsat tekshirish (_canRead/_canWrite)
 │       ├── user.dart            # User model
 │       └── user_storage.dart    # Foydalanuvchi CRUD
@@ -57,15 +58,17 @@ exim-raw-control-backend/
 │   ├── 008_module_corrections.sql
 │   ├── 009_hr_pay_types.sql
 │   ├── 010_attendance_overtime.sql
-│   └── 011_fixed_route.sql        # fh.warehouses.fixed_route_to_id
-│   └── 012_dealers.sql            # fh.dealers + indekslar
-│   └── 013_attendance_gps_audit.sql  # GPS self-checkin, audit jurnal, factory_locations, employee rol
+│   ├── 011_fixed_route.sql        # fh.warehouses.fixed_route_to_id
+│   ├── 012_dealers.sql            # fh.dealers + indekslar
+│   ├── 013_attendance_gps_audit.sql  # GPS self-checkin, audit jurnal, factory_locations, employee rol
+│   └── 014_hr_payroll_v2.sql      # fh.holidays + work_records v2 (hours_worked, day_type) — server boot'da ham idempotent
 ├── tool/                        # Test skriptlari va migration runner'lar
-│   ├── e2e_flow.dart           # To'liq e2e test (165 test, server 8051)
+│   ├── e2e_flow.dart           # To'liq e2e test (191 test, server 8051)
 │   ├── test_hr_pay.dart        # HR + ish haqi testlari (38 test)
+│   ├── test_payroll_v2_api.dart # Payroll v2 API testi (46 test, aniq raqamlar)
 │   ├── probe_overtime.dart     # Overtime tekshiruvi (9 test)
 │   └── migrate_*.dart          # Migratsiya runner'lar
-├── .env                         # DATABASE_URL (Neon)
+├── .env                         # DATABASE_URL (Neon) + JWT_SECRET
 ├── Dockerfile                   # Dart 3.12 SDK, JIT
 ├── render.yaml                  # Render deploy konfiguratsiyasi
 └── pubspec.yaml
@@ -104,8 +107,9 @@ dart run lib\server.dart
 ### Testlar (server 8051 ustida)
 ```powershell
 $env:JWT_SECRET='test-secret-hr-e2e'
-dart run tool\e2e_flow.dart    # 105 test (mahsulotlar, omborlar, transferlar, ishlab chiqarish)
+dart run tool\e2e_flow.dart    # 191 test (mahsulotlar, omborlar, transferlar, ishlab chiqarish, payroll)
 dart run tool\test_hr_pay.dart  # 38 test (HR, davomat, oylik hisob)
+dart run tool\test_payroll_v2_api.dart  # 46 test (holidays CRUD, work_records v2, monthly-report aniq raqamlar)
 dart run tool\probe_overtime.dart  # 9 test (overtime tekshiruvi)
 ```
 
@@ -153,7 +157,8 @@ dart run tool\migrate_010.dart
 | `fh.attendance_audit_log` | Davomat tahriri jurnali (changed_by, field_name, old_value, new_value, changed_at) |
 | `fh.factory_locations` | Fabrika lokatsiyalari (latitude, longitude, radius_meters, is_active) — GPS radius tekshiruvi uchun |
 | `fh.piece_rates` | Ish turi ↔ narx (work_type, item_id, rate_per_unit, unit) |
-| `fh.work_records` | Ish yozuvlari (work_type, item_id, quantity, rate_applied, computed_amount) |
+| `fh.work_records` | Ish yozuvlari v2 (work_type, item_id, quantity, hours, day_type: sof_qadoqlash/sof_soatbay/aralash, rate_applied, computed_amount NULLABLE — soatbay/aralash `pending`) |
+| `fh.holidays` | Bayramlar (name, work_date UNIQUE, is_active, created_by) |
 | `fh.salary_adjustments` | Premiya/jarima/avans (adjustment_type, amount, status: pending/approved/rejected) |
 
 ### View'lar
@@ -278,12 +283,15 @@ dart run tool\migrate_010.dart
 | GET | `/fh/hr/attendance/me` | Bugungi davomat + xodim (employee roli) |
 | GET/POST | `/fh/hr/piece-rates` | Ish turi ↔ narx |
 | PUT/DELETE | `/fh/hr/piece-rates/<id>` | Tahrirlash/O'chirish |
-| GET/POST | `/fh/hr/work-records` | Ish yozuvlari (avto + qo'lda) |
+| GET/POST | `/fh/hr/work-records` | Ish yozuvlari v2 (avto + qo'lda; quantity/hours/day_type: sof_qadoqlash\|sof_soatbay\|aralash; soatbay/aralash → pending, stavka work_type bo'yicha avto lookup) |
 | DELETE | `/fh/hr/work-records/<id>` | O'chirish |
+| GET/POST | `/fh/hr/holidays` | Bayramlar (month filtr; POST name + date) |
+| PUT/DELETE | `/fh/hr/holidays/<id>` | Bayram tahrirlash/o'chirish |
 | GET/POST | `/fh/hr/salary-adjustments` | Premiya/jarima/avans |
 | PUT | `/fh/hr/salary-adjustments/<id>/approve` | Tasdiqlash |
 | PUT | `/fh/hr/salary-adjustments/<id>/reject` | Rad etish |
-| GET | `/fh/hr/reports/monthly` | Oylik hisob (total_hours, total_overtime_hours, daysEarlyLeave, net_amount) |
+| GET | `/fh/hr/reports/monthly` | Legacy oylik hisob (total_hours, total_overtime_hours, daysEarlyLeave, net_amount) |
+| GET | `/fh/hr/monthly-report?year=&month=&employee_id=` | Payroll v2 hisoboti (payroll.dart): workingDays/normHours/hourlyRate/overtimeHours+Pay, pieceTotal/avgHourlyRate/pendingDays, jami total + summary |
 
 ### Boshqa
 | Method | Endpoint | Tavsif |
@@ -379,7 +387,7 @@ $env:JWT_SECRET='test-secret-hr-e2e'; dart run tool\test_hr_pay.dart
 
 | Sana | Commit | Tavsif |
 |---|---|---|
-| 2026-09-12 | `HEAD` | **Transfer avtomanzillari + CHIQIM/KIRIM tuzatish:** (1) `GET /warehouses/<id>` finished/dealer manba uchun faol diller omborlarini **avtomatik** `transferTo`/`transferToWarehouses` ga qo'shadi (o'zi mustasno); `POST /transfers/send` finished/dealer→diller avto-yo'nalishga ruxsat (boshqa hollarda 403 saqlanadi), transfer **pending** qoladi. (2) Frontend Chiqim/Kirim royhati tuzatildi: chiqim = faqat ombor qoldig'idagi elementlar (`GET /warehouses/<id>` stock, maxQty tekshiruvi, 0 qoldiq "Bu omborda qoldiq yo'q"), kirim = ombor turiga qat'iy bog'langan katalog (`raw_material`→'Xom ashyo', `finished`→'Mahsulot', `packaging`→'Qadoqlash', `semi_finished`→'Yarim tayyor', `spare_parts`→'Zap qism'); backend `POST /warehouse/transaction` allowedTypes `packaging/semi/spare_part/...` bilan kengaytirildi. (3) Desktop va kattalashtirish: `_TransferSheet`/`_TransactionSheet` yorlig'i va ro'yxati `AppBreakpoints.isDesktop` da kattalashdi (maksimal kenglik 720, shrift 1.15x, tugma 48px, `Center+ConstrainedBox`). (4) `DELETE /warehouses/<id>` va `DELETE /dealers/<id>` endi `fh.stock_transfers` qoldiqlarini ham tozalaydi (source_/dest_). E2E **190/190**. |
+| 2026-09-12 | `1b25f98` | **Transfer avtomanzillari + CHIQIM/KIRIM tuzatish:** finished/dealer manba omborlari uchun faol diller omborlari **avtomatik** transfer manzili (`transferTo`/`transferToWarehouses`, o'zi mustasno); `POST /transfers/send` finished/dealer→diller ruxsat (boshqa hollarda 403), transfer **pending** qoladi. **CHIQIM/KIRIM ro'yxati** frontend'da tuzatildi: chiqim = faqat ombor qoldig'idagi elementlar (maxQty cheklovi), kirim = ombor turiga qat'iy bog'langan katalog (`raw_material`→Xom ashyo, `finished`→Mahsulot, `packaging`→Qadoqlash, `semi_finished`→Yarim tayyor, `spare_parts`→Zap qism); backend `POST /warehouse/transaction` allowedTypes kengaytirildi. **Desktop:** `_TransferSheet`/`_TransactionSheet` `AppBreakpoints.isDesktop` da kattalashdi (maksimal kenglik 720, shrift 1.15x, tugma 48px, `Center+ConstrainedBox`). **Fix:** `DELETE /warehouses/<id>` va `DELETE /dealers/<id>` endi `fh.stock_transfers` qoldiqlarini ham tozalaydi (source_/dest_ ustunlari). E2E **190/190**, frontend `c7ecd4f` |
 | 2026-09-11 | `84a09bd` | **Ish vaqtini hisoblash qoidasi:** tushlik (12:00–14:00) ish vaqtidan chiqarildi — to'liq kun 08:00–12:00 (4s) + 14:00–18:00 (4s) = **8 soat**; `_hours()` backend + `_previewHours` frontend sinxronlashtirildi; prognozda "obed" matni olib tashlandi; e2e +5 test (08:00-12:00→4.0, 14:00-18:00→4.0, 08:00-16:00→6.0, 12:00-14:00→0.0, 08:00-18:00→8.0). E2E 170/170, OT-probe 9/9 |
 | 2026-09-11 | `fe3386d` | **Davomat GPS + audit + erta ketish:** `013_attendance_gps_audit.sql` (GPS lat/lng, marked_by self/manager, is_early_leave, attendance_audit_log, factory_locations, users.role employee, monthly view days_early_leave). `/hr/attendance/self-checkin` (Haversine 200m radius, marked_by=self), `/hr/attendance/me`, `/unmarked`, `/<id>/audit`; PUT audit INSERT'lar bilan; GET/`/me` employee roli faqat o'z yozuvlari. `POST /users` role=employee → avto hr granti + employee_id link. Bootstrap DDL-lardan view recreation'gacha idempotent. Frontend `81489e5`: self_checkin_screen (GPS KELDIM/KETDIM, ofis hududi), 3 holatli kuzatuv (Keldi/Kech qoldi vaqt bilan/Kelmadi), "Erta ketdi" chipi, audit dialog, xodim uchun login yaratish, oylik `daysEarlyLeave`. E2E 165/165. Hisobot: `DAVOMAT_GPS_AUDIT_HISOBOTI.md` |
 | 2026-09-11 | `af7603d` | **Dillerlar (dealers) moduli:** `fh.dealers` (012), `/dealers` CRUD — avto ombor (type='dealer', can_transfer) + dealer→finished qaytarish yo'nalishi, ro'yxat balans N+1 siz, detail to'liq qoldiq, PUT ombor nomi sinxron, DELETE qoldiq<>0 da 409 + cascade. Frontend `8303dcc`: "Dillerlar" ekrani (Ichki bozor/Eksport segment), forma + detail; TransferSheet bozor segmentlari (ichki/eksport) bo'yicha diller tanlash. E2E 151/151 |

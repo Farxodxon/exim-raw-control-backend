@@ -347,6 +347,33 @@ LEFT JOIN adj_agg  adj  ON adj.employee_id = m.employee_id AND adj.month = m.mon
       ''');
       print('✅ fh.attendance GPS + audit log + factory location ensured');
     } catch (e) { print('⚠️ fh.attendance GPS/audit error: $e'); }
+    try {
+      final conn = await DatabaseConnection.getConnection();
+      // Payroll v2 (migration 014): bayram/dam kalendari + work_records
+      // hours_worked/day_type. Bo'sh DB'da ham server ishga tushishi uchun.
+      await conn.execute('''
+        CREATE TABLE IF NOT EXISTS fh.holidays (
+          id SERIAL PRIMARY KEY,
+          holiday_date DATE NOT NULL UNIQUE,
+          label TEXT NOT NULL DEFAULT 'Bayram',
+          created_by INTEGER REFERENCES fh.users(id),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      ''');
+      await conn.execute('CREATE INDEX IF NOT EXISTS idx_holidays_month ON fh.holidays(holiday_date)');
+      await conn.execute('''
+        ALTER TABLE fh.work_records
+          ADD COLUMN IF NOT EXISTS hours_worked NUMERIC(5,2),
+          ADD COLUMN IF NOT EXISTS day_type TEXT
+            CHECK (day_type IN ('sof_qadoqlash', 'sof_soatbay', 'aralash'))
+      ''');
+      // computed_amount ishbayning hali hisoblanmagan (pending) kunlari uchun NULL.
+      await conn.execute('ALTER TABLE fh.work_records ALTER COLUMN computed_amount DROP NOT NULL');
+      // sof_soatbay kuni faqat soat bilan bo'lishi mumkin (quantity=0).
+      await conn.execute('ALTER TABLE fh.work_records DROP CONSTRAINT IF EXISTS work_records_quantity_check');
+      await conn.execute('ALTER TABLE fh.work_records ADD CONSTRAINT work_records_quantity_check CHECK (quantity >= 0)');
+      print('✅ fh.holidays + work_records v2 ensured');
+    } catch (e) { print('⚠️ fh.payroll v2 columns error: $e'); }
   } catch (e) {
     print('⚠️ Database not connected: \$e');
   }

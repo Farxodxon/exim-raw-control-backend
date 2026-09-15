@@ -897,6 +897,15 @@ Future<void> main() async {
   check('gps: /hr/attendance/me no-employee 403', s == 403, 'status=$s $j');
 
   // Xodim yaratish va linklash (employee role bilan).
+  // Oldingi to'xtab qolgan run'larning qoldiqlarini tozalaymiz (idempotent).
+  await c.execute('DELETE FROM fh.attendance WHERE employee_id IN '
+      '(SELECT id FROM fh.employees WHERE user_id IN '
+      "(SELECT id FROM fh.users WHERE email = 'e2e_gps@test.uz'))");
+  await c.execute('DELETE FROM fh.employees WHERE user_id IN '
+      "(SELECT id FROM fh.users WHERE email = 'e2e_gps@test.uz')");
+  await c.execute('DELETE FROM fh.user_modules WHERE user_id IN '
+      "(SELECT id FROM fh.users WHERE email = 'e2e_gps@test.uz')");
+  await c.execute("DELETE FROM fh.users WHERE email = 'e2e_gps@test.uz'");
   final empUser = await c.execute(
     "INSERT INTO fh.users (username, email, password, role) "
     "VALUES ('e2e_gps_test', 'e2e_gps@test.uz', 'pass123', 'employee') "
@@ -1037,6 +1046,12 @@ Future<void> main() async {
   (s, j) = await call('GET', '/hr/reports/monthly', tokenStr: adminTok);
   final monthRows = (j['rows'] as List);
   check('monthly: has rows', s == 200 && monthRows.isNotEmpty, 'status=$s $j');
+
+  // Payroll v2: oylik ish haqi (payroll.dart) hisoboti endpoint ishlaydi.
+  (s, j) = await call('GET', '/hr/monthly-report?year=2025&month=3', tokenStr: adminTok);
+  check('payroll monthly-report: 200 + rows', s == 200
+      && j.containsKey('rows') && (j['rows'] is List)
+      && j.containsKey('summary'), 'status=$s ${(j..remove('rows')).toString()}');
 
   // Tozalash: test xodimlarini o'chirish.
   await c.execute('DELETE FROM fh.attendance_audit_log WHERE attendance_id IN '
